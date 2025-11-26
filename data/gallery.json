@@ -384,5 +384,17 @@
         "thumb": "sahaya_events/Food_Donation_23/11/2025/thumbs/IMG_1845_thumb"
       }
     }
+  ],
+  "ggggggg": [
+    {
+      "original": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764164450/sahaya_events/ggggggg/original/IMG_1845.webp",
+      "optimized": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764164452/sahaya_events/ggggggg/optimized/IMG_1845_opt.jpg",
+      "thumb": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764164454/sahaya_events/ggggggg/thumbs/IMG_1845_thumb.jpg",
+      "public_ids": {
+        "original": "sahaya_events/ggggggg/original/IMG_1845",
+        "optimized": "sahaya_events/ggggggg/optimized/IMG_1845_opt",
+        "thumb": "sahaya_events/ggggggg/thumbs/IMG_1845_thumb"
+      }
+    }
   ]
 }
