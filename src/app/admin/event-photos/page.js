@@ -282,3 +282,11 @@
 //   res.setHeader("Allow", ["GET", "POST", "DELETE"]);
 //   return res.status(405).end(`Method ${req.method} Not Allowed`);
 // }
+export default function EventPhotosPage() {
+  return (
+    <div style={{ padding: "40px", fontSize: "20px" }}>
+      <h1>Event Photos</h1>
+      <p>This page is under construction.</p>
+    </div>
+  );
+}
