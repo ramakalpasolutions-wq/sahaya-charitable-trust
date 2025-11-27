@@ -30,7 +30,7 @@ export default function Contact() {
 
               <p className="flex items-start gap-2">
                 <span aria-hidden>📧</span>
-                <a href="mailto:sahayacharitabletrust@gmail.com" className="hover:underline">sahayacharitabletrust@gmail.com</a>
+                <a href="mailto:sahayacharitabletrustt@gmail.com" className="hover:underline">sahayacharitabletrust@gmail.com</a>
               </p>
 
               <p className="text-sm text-gray-600 mt-2">
