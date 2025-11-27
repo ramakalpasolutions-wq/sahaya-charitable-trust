@@ -43,11 +43,11 @@ export default function AdminPage() {
   }
 
   // Allowed extensions (lowercase) and simple MIME check
-  const allowedExts = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic", ".tiff"];
+  const allowedExts = [".webp"];
   function isValidImageFile(file) {
     if (!file) return false;
     // basic MIME check
-    if (file.type && !file.type.startsWith("image/")) return false;
+    if (file.type !== "image/webp") return false;
     // extension check (filename may be missing in some environments)
     const name = (file.name || "").toLowerCase();
     return allowedExts.some(ext => name.endsWith(ext));
@@ -68,29 +68,29 @@ export default function AdminPage() {
   // Load gallery + slider
   // -----------------------
   async function loadGallery() {
-    try {
-      const res = await fetch(API);
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || "Failed to load gallery");
+  try {
+    const res = await fetch(API);
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || "Failed to load gallery");
 
-      const galleryFromBody = body.gallery ?? body;
-      const sliderFromBody = body.slider ?? body.home_slider ?? body.homeSlider ?? [];
+    const galleryFromBody = body.gallery ?? body;
+    const sliderFromBody = body.slider ?? body.home_slider ?? body.homeSlider ?? [];
 
-      const finalGallery = body.gallery ?? (galleryFromBody.gallery ? galleryFromBody.gallery : (typeof galleryFromBody === "object" ? galleryFromBody : {}));
-      setGallery(finalGallery || {});
-      setHeroGallery(Array.isArray(sliderFromBody) ? sliderFromBody : []);
+    const finalGallery = body.gallery ?? (galleryFromBody.gallery ? galleryFromBody.gallery : (typeof galleryFromBody === "object" ? galleryFromBody : {}));
+    setGallery(finalGallery || {});
+    setHeroGallery(Array.isArray(sliderFromBody) ? sliderFromBody : []);
 
-      const keys = Object.keys(finalGallery || {});
-      const firstNonHero = keys.find(k => !HERO_KEYS.has(k)) ?? "";
-      setSelectedEvent((prev) => prev || firstNonHero);
-    } catch (err) {
-      console.error(err);
-      setGallery({});
-      setHeroGallery([]);
-      setSelectedEvent("");
-      setStatus("Error loading gallery");
-    }
+    // Do NOT auto-select the first event on load — leave selection empty after refresh.
+    setSelectedEvent("");
+  } catch (err) {
+    console.error(err);
+    setGallery({});
+    setHeroGallery([]);
+    setSelectedEvent("");
+    setStatus("Error loading gallery");
   }
+}
+
 
   useEffect(() => {
     loadGallery();
@@ -478,14 +478,14 @@ export default function AdminPage() {
 
                 <div>
                   <label className="block text-sm mb-1 ">Single Image (optional)</label>
-                  <input type="file" accept="image/*" className="border-2 border-red-900" onChange={onSingleFileChange} />
+                  <input type="file" accept="image/*" className="border-2 border-blue-900" onChange={onSingleFileChange} />
                 </div>
 
                 <div className="text-center font-bold text-red-600">OR</div>
 
                 <div>
                   <label className="block text-sm mb-1">Select Multiple Images</label>
-                  <input type="file" accept="image/*" className="border-2 border-red-800 rounded" multiple onChange={onMultipleFilesChange} />
+                  <input type="file" accept="image/*" className="border-2 border-blue-800 rounded" multiple onChange={onMultipleFilesChange} />
                   <p className="text-xs mt-1">{files.length} file(s) selected</p>
                 </div>
 
@@ -588,33 +588,33 @@ export default function AdminPage() {
               type="file"
               accept="image/*"
               multiple
-              className="mt-3 border text-red-900 border-red-900 rounded-md"
+              className="mt-3 border text-red-900 border-red-900 rounded-md hover:cursor-pointer"
               onChange={onHeroFilesChange} />
 
             <p className="text-s mt-1">{heroFiles.length} selected</p>
 
-            <div className="flex flex-col gap-5 mt-4">
+            <div className="flex flex-row gap-5 mt-4">
               <button
                 onClick={handleHeroUpload}
                 disabled={heroUploading}
-                className="px-3 py-2 bg-blue-900 text-white rounded "
+                className="px-3 py-2 bg-blue-900 text-white rounded hover:cursor-pointer"
               >
                 {heroUploading ? "Uploading..." : "Upload to Home Carousel"}
               </button>
 
-              <button
+             {/* { <button
                 onClick={() => uploadExampleLocal({ hero: true })}
                 className="px-3 py-2 border rounded"
               >
                 Upload Example Local
-              </button>
+              </button>} */}
 
               <button
                 onClick={() => {
                   setHeroFiles([]);
                   setHeroPreview(EXAMPLE_LOCAL_PATH);
                 }}
-                className="px-3 py-2 bg-black/50 text-white rounded"
+                className="px-3 py-2 bg-black/50 text-white rounded hover:cursor-pointer"
               >
                 Reset
               </button>
@@ -646,7 +646,7 @@ export default function AdminPage() {
                       Open
                     </a>
                     <button
-                      className="text-m text-red-700 underline"
+                      className="text-m text-red-700 underline hover:cursor-pointer"
                       onClick={() =>
                         deleteImageFromServer(
                           "home_slider",

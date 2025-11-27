@@ -1,16 +1,6 @@
 {
   "home_slider": [
     {
-      "original": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764155635/sahaya_events/home_slider/original/IMG-20251111-WA0018.webp",
-      "optimized": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764155636/sahaya_events/home_slider/optimized/IMG-20251111-WA0018_opt.jpg",
-      "thumb": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764155637/sahaya_events/home_slider/thumbs/IMG-20251111-WA0018_thumb.jpg",
-      "public_ids": {
-        "original": "sahaya_events/home_slider/original/IMG-20251111-WA0018",
-        "optimized": "sahaya_events/home_slider/optimized/IMG-20251111-WA0018_opt",
-        "thumb": "sahaya_events/home_slider/thumbs/IMG-20251111-WA0018_thumb"
-      }
-    },
-    {
       "original": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764156720/sahaya_events/home_slider/original/IMG_1852.webp",
       "optimized": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764156721/sahaya_events/home_slider/optimized/IMG_1852_opt.jpg",
       "thumb": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764156723/sahaya_events/home_slider/thumbs/IMG_1852_thumb.jpg",
@@ -31,27 +21,17 @@
       }
     },
     {
-      "original": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764155635/sahaya_events/home_slider/original/IMG-20251111-WA0018.webp",
-      "optimized": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764155636/sahaya_events/home_slider/optimized/IMG-20251111-WA0018_opt.jpg",
-      "thumb": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764155637/sahaya_events/home_slider/thumbs/IMG-20251111-WA0018_thumb.jpg",
+      "original": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764220905/sahaya_events/home_slider/original/IMG-20251110-WA0007.webp",
+      "optimized": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764220907/sahaya_events/home_slider/optimized/IMG-20251110-WA0007_opt.jpg",
+      "thumb": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764220909/sahaya_events/home_slider/thumbs/IMG-20251110-WA0007_thumb.jpg",
       "public_ids": {
-        "original": "sahaya_events/home_slider/original/IMG-20251111-WA0018",
-        "optimized": "sahaya_events/home_slider/optimized/IMG-20251111-WA0018_opt",
-        "thumb": "sahaya_events/home_slider/thumbs/IMG-20251111-WA0018_thumb"
+        "original": "sahaya_events/home_slider/original/IMG-20251110-WA0007",
+        "optimized": "sahaya_events/home_slider/optimized/IMG-20251110-WA0007_opt",
+        "thumb": "sahaya_events/home_slider/thumbs/IMG-20251110-WA0007_thumb"
       }
     }
   ],
   "2024_events": [
-    {
-      "original": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764154948/sahaya_events/Event1/original/IMG-20250201-WA0007.webp",
-      "optimized": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764154948/sahaya_events/Event1/optimized/IMG-20250201-WA0007_opt.jpg",
-      "thumb": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764154950/sahaya_events/Event1/thumbs/IMG-20250201-WA0007_thumb.jpg",
-      "public_ids": {
-        "original": "sahaya_events/Event1/original/IMG-20250201-WA0007",
-        "optimized": "sahaya_events/Event1/optimized/IMG-20250201-WA0007_opt",
-        "thumb": "sahaya_events/Event1/thumbs/IMG-20250201-WA0007_thumb"
-      }
-    },
     {
       "original": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764154952/sahaya_events/Event1/original/IMG-20250201-WA0009.webp",
       "optimized": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764154953/sahaya_events/Event1/optimized/IMG-20250201-WA0009_opt.jpg",
@@ -170,6 +150,16 @@
         "original": "sahaya_events/Event1/original/IMG-20251111-WA0018",
         "optimized": "sahaya_events/Event1/optimized/IMG-20251111-WA0018_opt",
         "thumb": "sahaya_events/Event1/thumbs/IMG-20251111-WA0018_thumb"
+      }
+    },
+    {
+      "original": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764165715/sahaya_events/2024_events/original/IMG-20250201-WA0007.webp",
+      "optimized": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764165717/sahaya_events/2024_events/optimized/IMG-20250201-WA0007_opt.jpg",
+      "thumb": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764165718/sahaya_events/2024_events/thumbs/IMG-20250201-WA0007_thumb.jpg",
+      "public_ids": {
+        "original": "sahaya_events/2024_events/original/IMG-20250201-WA0007",
+        "optimized": "sahaya_events/2024_events/optimized/IMG-20250201-WA0007_opt",
+        "thumb": "sahaya_events/2024_events/thumbs/IMG-20250201-WA0007_thumb"
       }
     }
   ],
@@ -382,18 +372,6 @@
         "original": "sahaya_events/Food_Donation_23/11/2025/original/IMG_1845",
         "optimized": "sahaya_events/Food_Donation_23/11/2025/optimized/IMG_1845_opt",
         "thumb": "sahaya_events/Food_Donation_23/11/2025/thumbs/IMG_1845_thumb"
-      }
-    }
-  ],
-  "ggggggg": [
-    {
-      "original": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764164450/sahaya_events/ggggggg/original/IMG_1845.webp",
-      "optimized": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764164452/sahaya_events/ggggggg/optimized/IMG_1845_opt.jpg",
-      "thumb": "https://res.cloudinary.com/djbb3gcte/image/upload/v1764164454/sahaya_events/ggggggg/thumbs/IMG_1845_thumb.jpg",
-      "public_ids": {
-        "original": "sahaya_events/ggggggg/original/IMG_1845",
-        "optimized": "sahaya_events/ggggggg/optimized/IMG_1845_opt",
-        "thumb": "sahaya_events/ggggggg/thumbs/IMG_1845_thumb"
       }
     }
   ]
