@@ -25,12 +25,12 @@ export default function Contact() {
 
               <p className="flex items-start gap-2">
                 <span aria-hidden>📞</span>
-                <a href="tel:+919876543210" className="hover:underline">+91 98765 43210</a>
+                <a href="tel:+919876543210" className="hover:underline">+91 94946 76669</a>
               </p>
 
               <p className="flex items-start gap-2">
                 <span aria-hidden>📧</span>
-                <a href="mailto:sahayacharitabletrustt@gmail.com" className="hover:underline">sahayacharitabletrust@gmail.com</a>
+                <a href="mailto:sahayacharitabletrustt@gmail.com" className="hover:underline">sahayacharitabletrustt@gmail.com</a>
               </p>
 
               <p className="text-sm text-gray-600 mt-2">
