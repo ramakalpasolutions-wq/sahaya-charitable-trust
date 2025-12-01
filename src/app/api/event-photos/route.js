@@ -1,35 +1,19 @@
-// app/api/event-photos/route.js
+// src/app/api/event-photos/route.js
 /**
- * Cloudinary-enabled event-photos API for Next.js (Node server runtime).
+ * Cloudinary-backed event-photos API (Vercel-safe).
+ * - Stores gallery metadata in Cloudinary as a raw file (gallery.json)
+ * - Uploads images directly from request buffers (no local files)
  *
- * Notes:
- * - Primary storage: Cloudinary (recommended for serverless).
- * - Fallback local saves (only used if Cloudinary upload fails) are written to OS tmp dir,
- *   NOT to the project's /public folder (which is read-only on many serverless hosts).
- *
- * Setup:
- * 1. Install: npm i cloudinary
- * 2. Ensure env vars are set:
- *    - CLOUDINARY_CLOUD_NAME
- *    - CLOUDINARY_API_KEY
- *    - CLOUDINARY_API_SECRET
+ * Env required:
+ *   CLOUDINARY_CLOUD_NAME
+ *   CLOUDINARY_API_KEY
+ *   CLOUDINARY_API_SECRET
  */
 
-import fs from "fs/promises";
-import path from "path";
-import os from "os";
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
+import stream from "stream";
 
-const ROOT = process.cwd();
-const DATA_DIR = path.join(ROOT, "data");
-const GALLERY_FILE = path.join(DATA_DIR, "gallery.json");
-
-// Note: we keep PUBLIC_DIR constants only for backwards compatibility when reading gallery items
-// but we DON'T try to create or write into PUBLIC_DIR in serverless environments.
-const PUBLIC_DIR = path.join(ROOT, "public"); // used only for path construction if needed
-
-// Cloudinary config from env
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -37,57 +21,68 @@ cloudinary.config({
   secure: true,
 });
 
-// writable tmp dir (OS-level, safe on serverless)
-const TMP_DIR = path.join(os.tmpdir(), "sahaya_event_photos_tmp");
+// THE public_id where gallery.json will be stored in Cloudinary (folder + id)
+const GALLERY_PUBLIC_ID = "metadata/versatileservicestrust_gallery"; // folder: metadata, public_id: versatileservicestrust_gallery
+const GALLERY_RESOURCE_TYPE = "raw";
 
-// Flag: whether public dir appears writable (best-effort). We will NOT attempt to create public/uploads automatically.
-let PUBLIC_IS_WRITABLE = false;
+// Helper: upload a Buffer to Cloudinary (works for images and raw files)
+function uploadBufferToCloudinary(buffer, options = {}) {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(options, (err, res) => {
+      if (err) return reject(err);
+      resolve(res);
+    });
+    const passthrough = new stream.PassThrough();
+    passthrough.end(buffer);
+    passthrough.pipe(uploadStream);
+  });
+}
 
-async function ensureFiles() {
-  // Always ensure data dir exists (we need gallery.json)
-  await fs.mkdir(DATA_DIR, { recursive: true });
-
-  // ensure tmp dir exists (writable on serverless)
-  await fs.mkdir(TMP_DIR, { recursive: true });
-
-  // detect whether PUBLIC_DIR is writable by trying to create a tiny dir inside it.
-  // We catch errors and simply set PUBLIC_IS_WRITABLE accordingly.
+// Read gallery.json from Cloudinary (returns { gallery: {}, slider: [] })
+async function readGalleryFromCloudinary() {
   try {
-    const testDir = path.join(PUBLIC_DIR, ".write_test");
-    await fs.mkdir(testDir, { recursive: true });
-    // cleanup
-    await fs.rmdir(testDir).catch(() => {});
-    PUBLIC_IS_WRITABLE = true;
+    // Check if resource exists
+    const resource = await cloudinary.api.resource(GALLERY_PUBLIC_ID, { resource_type: GALLERY_RESOURCE_TYPE });
+    if (!resource || !resource.secure_url) {
+      // fallback default
+      return { gallery: {}, slider: [] };
+    }
+    // Fetch the raw file content via secure URL
+    const res = await fetch(resource.secure_url);
+    if (!res.ok) return { gallery: {}, slider: [] };
+    const jsonText = await res.text();
+    let parsed = {};
+    try {
+      parsed = JSON.parse(jsonText || "{}");
+    } catch (e) {
+      parsed = {};
+    }
+    const gallery = parsed.gallery || (Object.keys(parsed).length > 0 && !Array.isArray(parsed) ? parsed : {});
+    const slider = parsed.slider || parsed.home_slider || parsed.homeSlider || [];
+    return { gallery, slider };
   } catch (e) {
-    PUBLIC_IS_WRITABLE = false;
-    // don't throw — continue with tmp/cloudinary-only behavior
-  }
-
-  // ensure gallery file exists (in the data dir)
-  try {
-    await fs.access(GALLERY_FILE);
-  } catch {
-    await fs.writeFile(GALLERY_FILE, JSON.stringify({ gallery: {}, slider: [] }, null, 2), "utf8");
+    // resource not found or other error -> return default
+    return { gallery: {}, slider: [] };
   }
 }
 
-async function readGallery() {
-  await ensureFiles();
-  const raw = await fs.readFile(GALLERY_FILE, "utf8");
-  const obj = raw ? JSON.parse(raw) : {};
-  const gallery = obj.gallery || (Object.keys(obj).length > 0 && !Array.isArray(obj) ? obj : {});
-  const slider = obj.slider || obj.home_slider || obj.homeSlider || [];
-  return { gallery, slider };
-}
-
-async function writeGallery(data) {
-  await ensureFiles();
+// Write gallery object to Cloudinary (overwrites raw file)
+async function writeGalleryToCloudinary(data) {
   const out = {
     gallery: data.gallery || {},
     slider: data.slider || data.home_slider || [],
     home_slider: data.slider || data.home_slider || [],
   };
-  await fs.writeFile(GALLERY_FILE, JSON.stringify(out, null, 2), "utf8");
+  const buffer = Buffer.from(JSON.stringify(out, null, 2), "utf8");
+  const options = {
+    public_id: GALLERY_PUBLIC_ID,
+    resource_type: GALLERY_RESOURCE_TYPE,
+    overwrite: true,
+    folder: "", // public_id already contains folder
+  };
+  // uploadBufferToCloudinary will stream and replace the raw file
+  const resp = await uploadBufferToCloudinary(buffer, options);
+  return resp;
 }
 
 function sanitizeName(n = "") {
@@ -111,80 +106,23 @@ function makeImageObj(rel) {
   return { original: normalized, optimized: normalized, thumb: normalized };
 }
 
-// Upload: write file into tmp then upload to Cloudinary from tmp path
-async function uploadFileToCloudinary(folder, file, filename) {
+// Upload image file buffer (File object from formData) directly to Cloudinary images
+async function uploadImageFromFile(file, folder, filename) {
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
-
-  // ensure tmp dir
-  await fs.mkdir(TMP_DIR, { recursive: true });
-  const tmpPath = path.join(TMP_DIR, filename);
-  await fs.writeFile(tmpPath, buffer);
-
-  try {
-    const uploadOptions = {
-      folder,              // cloudinary folder, e.g. "events/my_event" or "slider"
-      use_filename: true,
-      unique_filename: false,
-      resource_type: "image",
-      overwrite: false,
-    };
-    const res = await cloudinary.uploader.upload(tmpPath, uploadOptions);
-    return res;
-  } finally {
-    // best-effort cleanup
-    try { await fs.unlink(tmpPath).catch(() => {}); } catch (e) {}
-  }
+  const options = {
+    folder,
+    use_filename: true,
+    unique_filename: false,
+    resource_type: "image",
+    overwrite: false,
+    public_id: filename.replace(/\.[^/.]+$/, ""), // remove extension from public_id to keep deterministic
+  };
+  const res = await uploadBufferToCloudinary(buffer, options);
+  return res;
 }
 
-/**
- * Fallback: if Cloudinary upload fails, save into TMP_DIR (never attempt to write to /public by default).
- * Returns a string that may be a file:// path so it's discoverable for debugging - client should prefer Cloudinary URLs.
- */
-async function saveUploadedFileLocalFallback(file, filename) {
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  await fs.mkdir(TMP_DIR, { recursive: true });
-  const tmpPath = path.join(TMP_DIR, filename);
-  await fs.writeFile(tmpPath, buffer);
-  // Return a file:// url (client won't be able to display it, but it is useful for dev/debug)
-  return `file://${tmpPath}`;
-}
-
-/**
- * Delete local file if it's in tmp (file://... or path under TMP_DIR). We won't try to delete files under project/public
- * in production because that directory is often read-only.
- */
-async function tryDeleteLocalFileFromRel(rel) {
-  if (!rel) return;
-  try {
-    let candidate = String(rel);
-    if (candidate.startsWith("file://")) candidate = candidate.replace(/^file:\/\//, "");
-    // If candidate is absolute and under TMP_DIR, attempt deletion
-    if (path.resolve(candidate).startsWith(path.resolve(TMP_DIR))) {
-      if ((await fs.stat(candidate).catch(() => false))) {
-        await fs.unlink(candidate).catch(() => {});
-      }
-      return;
-    }
-
-    // If PUBLIC is writable and rel looks like a public path, attempt deletion there
-    if (PUBLIC_IS_WRITABLE) {
-      const relNoSlash = String(rel).replace(/^\//, "");
-      const p = path.join(PUBLIC_DIR, relNoSlash);
-      if ((await fs.stat(p).catch(() => false))) {
-        await fs.unlink(p).catch(() => {});
-      }
-      return;
-    }
-
-    // otherwise do not attempt deletion (likely read-only or external URL)
-    console.warn("Not deleting local file — not under tmp and public not writable:", rel);
-  } catch (e) {
-    console.warn("Failed to delete local file:", e);
-  }
-}
-
+// Try to destroy Cloudinary public_id
 async function tryDeleteCloudinaryPublicId(public_id) {
   if (!public_id) return;
   try {
@@ -198,7 +136,7 @@ async function tryDeleteCloudinaryPublicId(public_id) {
 // ---------------- GET ----------------
 export async function GET() {
   try {
-    const { gallery, slider } = await readGallery();
+    const { gallery, slider } = await readGalleryFromCloudinary();
     return NextResponse.json({ gallery, slider, home_slider: slider });
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
@@ -206,10 +144,11 @@ export async function GET() {
 }
 
 // ---------------- POST ----------------
+// Supports JSON commands and multipart/form-data for uploads
 export async function POST(req) {
   try {
     const contentType = req.headers.get("content-type") || "";
-    const { gallery, slider } = await readGallery();
+    const { gallery, slider } = await readGalleryFromCloudinary();
 
     // JSON commands
     if (contentType.includes("application/json")) {
@@ -219,7 +158,7 @@ export async function POST(req) {
         const name = sanitizeName(body.eventName || "");
         if (!name) return NextResponse.json({ error: "Missing eventName" }, { status: 400 });
         gallery[name] = gallery[name] || [];
-        await writeGallery({ gallery, slider });
+        await writeGalleryToCloudinary({ gallery, slider });
         return NextResponse.json({ ok: true, gallery, slider });
       }
 
@@ -228,7 +167,7 @@ export async function POST(req) {
         gallery[en] = gallery[en] || [];
         const item = { youtube: true, url: body.url };
         if (!gallery[en].some(i => i.youtube === true && i.url === body.url)) gallery[en].push(item);
-        await writeGallery({ gallery, slider });
+        await writeGalleryToCloudinary({ gallery, slider });
         return NextResponse.json({ ok: true, gallery, slider });
       }
 
@@ -241,7 +180,7 @@ export async function POST(req) {
           gallery[newName] = gallery[newName].concat(gallery[oldName]);
           delete gallery[oldName];
         }
-        await writeGallery({ gallery, slider });
+        await writeGalleryToCloudinary({ gallery, slider });
         return NextResponse.json({ ok: true, gallery, slider });
       }
 
@@ -255,30 +194,24 @@ export async function POST(req) {
       const rawEvent = String(form.get("eventName") || form.get("eventname") || form.get("event") || "");
       const eventName = hero ? "home_slider" : sanitizeName(rawEvent || "default_event");
 
-      const files = form.getAll("file");
+      const files = form.getAll("file"); // array of File objects
       if (!files || files.length === 0) return NextResponse.json({ error: "No file" }, { status: 400 });
 
       if (!hero) gallery[eventName] = gallery[eventName] || [];
 
+      // cloud folder target
       const cloudFolder = hero ? "slider" : `events/${eventName}`;
 
       for (const f of files) {
         const fname = `${Date.now()}-${(f.name || "upload").replace(/\s+/g, "_")}`;
         let uploadRes;
         try {
-          uploadRes = await uploadFileToCloudinary(cloudFolder, f, fname);
+          uploadRes = await uploadImageFromFile(f, cloudFolder, fname);
         } catch (e) {
-          console.warn("Cloudinary upload failed, saving to tmp as fallback:", e);
-          const relLocal = await saveUploadedFileLocalFallback(f, fname);
-          const objLocal = makeImageObj(relLocal);
-          if (hero) {
-            if (!slider.find(i => i.original === objLocal.original)) slider.push(objLocal);
-          } else {
-            gallery[eventName].push(objLocal);
-          }
+          console.warn("Cloudinary upload failed for file:", e);
+          // if upload fails, skip this file and continue (no local fallback)
           continue;
         }
-
         const obj = makeImageObjFromCloudinary(uploadRes);
         if (hero) {
           if (!slider.find(i => i.original === obj.original)) slider.push(obj);
@@ -287,7 +220,7 @@ export async function POST(req) {
         }
       }
 
-      await writeGallery({ gallery, slider });
+      await writeGalleryToCloudinary({ gallery, slider });
       return NextResponse.json({ ok: true, gallery, slider });
     }
 
@@ -299,10 +232,11 @@ export async function POST(req) {
 }
 
 // ---------------- DELETE ----------------
+// Accepts JSON body: { deleteEvent: true, eventName } OR { url, eventName?, hero? }
 export async function DELETE(req) {
   try {
     const body = await req.json();
-    const { gallery, slider } = await readGallery();
+    const { gallery, slider } = await readGalleryFromCloudinary();
 
     const { deleteEvent, eventName, url, hero } = body;
 
@@ -313,18 +247,15 @@ export async function DELETE(req) {
         try {
           const public_id = item.public_id || null;
           if (public_id) {
+            // public_id may include folder prefix if returned by Cloudinary
             await tryDeleteCloudinaryPublicId(public_id);
-          } else {
-            const fileRel = String(item.original || item.optimized || item.thumb || "");
-            if (!fileRel) continue;
-            await tryDeleteLocalFileFromRel(fileRel);
           }
         } catch (e) {
           console.warn("Failed to delete file for event:", e);
         }
       }
       delete gallery[en];
-      await writeGallery({ gallery, slider });
+      await writeGalleryToCloudinary({ gallery, slider });
       return NextResponse.json({ ok: true, gallery, slider });
     }
 
@@ -337,12 +268,10 @@ export async function DELETE(req) {
           if (it.original === url || it.optimized === url || it.thumb === url || it.public_id === url) {
             if (it.public_id) {
               await tryDeleteCloudinaryPublicId(it.public_id);
-            } else {
-              await tryDeleteLocalFileFromRel(it.original || it.optimized || it.thumb);
             }
           }
         }
-        await writeGallery({ gallery, slider: newSlider });
+        await writeGalleryToCloudinary({ gallery, slider: newSlider });
         return NextResponse.json({ ok: true, gallery, slider: newSlider });
       }
 
@@ -352,7 +281,7 @@ export async function DELETE(req) {
         const idxY = arr.findIndex(i => i && i.youtube === true && i.url === url);
         if (idxY >= 0) {
           arr.splice(idxY, 1);
-          await writeGallery({ gallery, slider });
+          await writeGalleryToCloudinary({ gallery, slider });
           return NextResponse.json({ ok: true, gallery, slider });
         }
       }
@@ -368,17 +297,15 @@ export async function DELETE(req) {
           try {
             if (removedObj.public_id) {
               await tryDeleteCloudinaryPublicId(removedObj.public_id);
-            } else {
-              await tryDeleteLocalFileFromRel(removedObj.original || removedObj.optimized || removedObj.thumb);
             }
           } catch (e) {
-            console.warn("Failed to unlink gallery file:", e);
+            console.warn("Failed to delete cloudinary object:", e);
           }
           break;
         }
       }
 
-      await writeGallery({ gallery, slider });
+      await writeGalleryToCloudinary({ gallery, slider });
       if (!removed) return NextResponse.json({ error: "Image not found" }, { status: 404 });
       return NextResponse.json({ ok: true, gallery, slider });
     }
