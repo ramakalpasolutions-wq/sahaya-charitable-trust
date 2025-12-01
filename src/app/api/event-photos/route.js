@@ -15,6 +15,10 @@
  *    - CLOUDINARY_API_SECRET
  */
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs"; 
+export const preferredRegion = "auto";
+
 import fs from "fs/promises";
 import path from "path";
 import os from "os";

@@ -274,6 +274,10 @@
 
 // //   return res.status(400).json({ error: "Invalid delete request" });
 // // }
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 
 export default async function handler(req, res) {
   if (req.method === "GET") return handleGet(req, res);
