@@ -24,10 +24,13 @@ export default function AdminPage() {
   const [useExisting, setUseExisting] = useState(true);
   const [status, setStatus] = useState("");
 
-  // hero card state (kept minimal)
+  // hero card state
   const [heroFiles, setHeroFiles] = useState([]);
   const [heroPreview, setHeroPreview] = useState(EXAMPLE_LOCAL_PATH);
   const [heroUploading, setHeroUploading] = useState(false);
+
+  // YouTube input (NEW) — accepts single or multiple URLs (newline or comma separated)
+  const [youtubeUrls, setYoutubeUrls] = useState("");
 
   // -----------------------
   // Helpers
@@ -38,18 +41,26 @@ export default function AdminPage() {
     return img.original || img.optimized || img.thumb || "";
   }
 
+  // safeSrc returns the string or null (so <img src={null} won't render)
+  function safeSrc(img) {
+    const s = getImgUrl(img);
+    return s && s.trim() !== "" ? s : null;
+  }
+
   function getHeroUrlSet(heroArr) {
     return new Set((heroArr || []).map(getImgUrl).filter(Boolean));
   }
 
   // Allowed extensions (lowercase) and simple MIME check
-  const allowedExts = [".webp"];
+  // NOTE: change this list if you want to accept jpg/png etc.
+  const allowedExts = [];
   function isValidImageFile(file) {
     if (!file) return false;
     // basic MIME check
-    if (file.type !== "image/webp") return false;
-    // extension check (filename may be missing in some environments)
+    if (file.type && !file.type.startsWith("image/")) return false;
+    // extension check fallback (accept if extension matches allowedExts)
     const name = (file.name || "").toLowerCase();
+    if (allowedExts.length === 0) return true;
     return allowedExts.some(ext => name.endsWith(ext));
   }
 
@@ -62,35 +73,67 @@ export default function AdminPage() {
   useEffect(() => {
     const logged = localStorage.getItem("isAdmin");
     if (!logged) router.push("/admin-login");
-  }, [router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // -----------------------
   // Load gallery + slider
   // -----------------------
   async function loadGallery() {
-  try {
-    const res = await fetch(API);
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.error || "Failed to load gallery");
+    try {
+      const res = await fetch(API);
 
-    const galleryFromBody = body.gallery ?? body;
-    const sliderFromBody = body.slider ?? body.home_slider ?? body.homeSlider ?? [];
+      // Read as text first so we can recover from empty/non-JSON responses
+      const text = await res.text().catch((e) => {
+        console.warn("loadGallery: failed to read response text:", e);
+        return "";
+      });
 
-    const finalGallery = body.gallery ?? (galleryFromBody.gallery ? galleryFromBody.gallery : (typeof galleryFromBody === "object" ? galleryFromBody : {}));
-    setGallery(finalGallery || {});
-    setHeroGallery(Array.isArray(sliderFromBody) ? sliderFromBody : []);
+      // Helpful debug output (dev only)
+      if (!res.ok || !text) {
+        console.debug("loadGallery: status=", res.status, "bodyLength=", text ? text.length : 0);
+      }
 
-    // Do NOT auto-select the first event on load — leave selection empty after refresh.
-    setSelectedEvent("");
-  } catch (err) {
-    console.error(err);
-    setGallery({});
-    setHeroGallery([]);
-    setSelectedEvent("");
-    setStatus("Error loading gallery");
+      let body;
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch (parseErr) {
+        console.error("loadGallery: invalid JSON from", API, "status:", res.status);
+        console.error("Response body (raw):", text);
+        // Set UI state to a friendly error and bail out (avoid uncaught json() error)
+        setGallery({});
+        setHeroGallery([]);
+        setSelectedEvent("");
+        setStatus("Error loading gallery: invalid server response");
+        return;
+      }
+
+      if (!res.ok) {
+        // body might contain an { error: ... } message
+        const errMsg = body?.error || `Failed to load gallery (status ${res.status})`;
+        throw new Error(errMsg);
+      }
+
+      // Backwards compatible parsing (your original logic)
+      const galleryFromBody = body.gallery ?? body;
+      const sliderFromBody = body.slider ?? body.home_slider ?? body.homeSlider ?? [];
+
+      const finalGallery =
+        body.gallery ??
+        (galleryFromBody.gallery ? galleryFromBody.gallery : typeof galleryFromBody === "object" ? galleryFromBody : {});
+
+      setGallery(finalGallery || {});
+      setHeroGallery(Array.isArray(sliderFromBody) ? sliderFromBody : []);
+      setSelectedEvent("");
+      setStatus("");
+    } catch (err) {
+      console.error("loadGallery error:", err);
+      setGallery({});
+      setHeroGallery([]);
+      setSelectedEvent("");
+      setStatus("Error loading gallery: " + (err.message || String(err)));
+    }
   }
-}
-
 
   useEffect(() => {
     loadGallery();
@@ -122,12 +165,7 @@ export default function AdminPage() {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Failed to create folder");
-
-      if (body.gallery) {
-        setGallery(body.gallery || {});
-      } else {
-        await loadGallery();
-      }
+      setGallery(body.gallery || (await loadGallery()) || {});
       setSelectedEvent(name);
       setEventName("");
       setStatus("Folder created");
@@ -141,17 +179,12 @@ export default function AdminPage() {
         });
         const body2 = await res2.json();
         if (!res2.ok) throw new Error(body2.error || "Fallback folder creation failed");
-
-        if (body2.gallery) {
-          setGallery(body2.gallery || {});
-        } else {
-          await loadGallery();
-        }
+        setGallery(body2.gallery || (await loadGallery()) || {});
         setSelectedEvent(name);
         setEventName("");
         setStatus("Folder created (via example upload)");
       } catch (err2) {
-        setStatus("Error creating folder: " + (err2.message || String(err)));
+        setStatus("Error creating folder: " + (err2.message || String(err2)));
       }
     }
   }
@@ -163,16 +196,15 @@ export default function AdminPage() {
     e?.preventDefault?.();
     const target = useExisting ? selectedEvent : eventName;
     if (!target) return alert("Please choose or enter an event name.");
-    // validate files again before upload
     const toUpload = singleFile ? [singleFile] : files;
     if (!toUpload || toUpload.length === 0) return alert("Pick one or more images to upload.");
 
     const valid = toUpload.filter(isValidImageFile);
     const invalidCount = toUpload.length - valid.length;
     if (invalidCount > 0) {
-      setStatus(`Rejected ${invalidCount} file(s). Allowed: ${allowedExts.join(", ")}`);
+      setStatus(`Rejected ${invalidCount} file(s). Allowed: ${allowedExts.join(", ") || "images"}`);
     }
-    if (valid.length === 0) return alert("No valid image files to upload. Allowed types: " + allowedExts.join(", "));
+    if (valid.length === 0) return alert("No valid image files to upload. Allowed types: " + (allowedExts.join(", ") || "images"));
 
     setStatus("Uploading to event...");
     try {
@@ -186,15 +218,9 @@ export default function AdminPage() {
 
       if (!res.ok) throw new Error(body.error || "Upload failed");
 
-      if (body.gallery) {
-        setGallery(body.gallery || {});
-      } else {
-        await loadGallery();
-      }
-
+      setGallery(body.gallery || body || (await loadGallery()) || {});
       setHeroGallery(body.slider || body.home_slider || []);
       setSelectedEvent(target);
-
       setFiles([]);
       setSingleFile(null);
       setEventName("");
@@ -205,24 +231,20 @@ export default function AdminPage() {
   }
 
   // -----------------------
-  // Rename event (new)
+  // Rename event
   // -----------------------
   async function renameEvent() {
     if (!selectedEvent) return alert("Select an event to rename.");
     const current = selectedEvent;
     const suggested = current.replace(/_/g, " ");
     const newNameRaw = prompt(`Rename event "${suggested}" to:`, suggested);
-    if (!newNameRaw) return; // cancelled or empty
+    if (!newNameRaw) return;
     const newName = newNameRaw.trim();
     if (!newName) return alert("Please provide a non-empty name.");
-
-    // normalize server-side key (keep same format as other keys if desired)
-    // we'll send raw newName and let server decide; locally we'll use sanitized key
     const newKey = newName.replace(/\s+/g, "_");
 
     setStatus("Renaming event...");
     try {
-      // attempt server-side rename (server should support renameEvent)
       const res = await fetch(API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -230,31 +252,18 @@ export default function AdminPage() {
       });
       const body = await res.json();
 
-      if (!res.ok) {
-        // server returned error — fall back to local rename with user notice
-        throw new Error(body.error || "Server refused rename");
-      }
-
-      if (body.gallery) {
-        setGallery(body.gallery || {});
-        setSelectedEvent(newKey);
-        setStatus("Renamed (server confirmed)");
-        return;
-      }
-
-      // if server succeeded but didn't return updated gallery, reload
-      await loadGallery();
+      if (!res.ok) throw new Error(body.error || "Server refused rename");
+      setGallery(body.gallery || (await loadGallery()) || {});
       setSelectedEvent(newKey);
-      setStatus("Renamed (server processed)");
+      setStatus("Renamed (server confirmed)");
     } catch (err) {
-      // fallback: rename locally in state so UI reflects change even if server doesn't support rename
+      // fallback local rename
       setGallery(prev => {
         const copy = { ...prev };
         if (!copy[current]) {
           setStatus("Rename failed: current event not found locally");
           return prev;
         }
-        // if newKey already exists, ask before overwriting
         if (copy[newKey]) {
           if (!confirm(`An event named "${newName}" already exists. Overwrite it locally?`)) {
             setStatus("Rename cancelled (duplicate)");
@@ -276,9 +285,8 @@ export default function AdminPage() {
   // -----------------------
   async function handleDeleteEvent(ev) {
     if (!ev) return alert("Select an event to delete.");
-    // prevent deleting hero slider via this flow
     if (HERO_KEYS.has(ev)) {
-      return alert("Cannot delete the home slider here. Remove hero images from the Hero Upload section.");
+      return alert("Cannot delete the home slider here. Remove hero images from the Hero Uploads section.");
     }
     if (!confirm(`Delete entire event '${ev}' and all its photos? This is irreversible.`)) return;
     setStatus("Deleting event...");
@@ -290,14 +298,9 @@ export default function AdminPage() {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Delete failed");
-
-      if (body.gallery) {
-        setGallery(body.gallery || {});
-      } else {
-        await loadGallery();
-      }
+      setGallery(body.gallery || (await loadGallery()) || {});
       setHeroGallery(body.slider || body.home_slider || []);
-      setSelectedEvent((prev) => (prev === ev ? (Object.keys(body.gallery || {}).find(k => !HERO_KEYS.has(k)) ?? "") : prev));
+      setSelectedEvent("");
       setStatus(`Deleted ${ev}`);
     } catch (err) {
       setStatus("Error: " + (err.message || String(err)));
@@ -305,36 +308,80 @@ export default function AdminPage() {
   }
 
   // -----------------------
-  // delete single image (event or hero)
-  // -----------------------
+  // delete single image (event or hero) or a youtube link (url)
+  // client: robust deleteImageFromServer - replace your current function
   async function deleteImageFromServer(event, url, opts = { hero: false }) {
-    if (!url) return;
-    if (!confirm("Remove this image?")) return;
+    // try to find a usable url if none passed
+    let targetUrl = (typeof url === "string" && url.trim()) ? url : null;
 
-    // don't allow deleting a hero url via the gallery flow
-    const heroSet = getHeroUrlSet(heroGallery);
-    if (!opts.hero && heroSet.has(url)) {
-      return alert("This image is part of the home slider and cannot be removed from the event gallery. Remove it from the Hero Uploads section instead.");
+    // try gallery[event]
+    if (!targetUrl && event && gallery[event] && Array.isArray(gallery[event])) {
+      for (const it of gallery[event]) {
+        const u = getImgUrl(it);
+        if (u) {
+          targetUrl = u;
+          console.debug("deleteImageFromServer: derived url from gallery item:", it);
+          break;
+        }
+        // fallback to explicit url field
+        if (it && it.url) {
+          targetUrl = it.url;
+          console.debug("deleteImageFromServer: derived url from gallery item.url:", it);
+          break;
+        }
+      }
     }
+
+    // try heroGallery when hero flag or when event is the hero key
+    if (!targetUrl && (opts.hero || event === "home_slider" || event === "homeSlider" || event === "home-slider")) {
+      for (const it of heroGallery || []) {
+        const u = getImgUrl(it);
+        if (u) {
+          targetUrl = u;
+          console.debug("deleteImageFromServer: derived url from heroGallery item:", it);
+          break;
+        }
+        if (it && it.url) {
+          targetUrl = it.url;
+          console.debug("deleteImageFromServer: derived url from heroGallery item.url:", it);
+          break;
+        }
+      }
+    }
+
+    if (!targetUrl) {
+      // give more actionable message and show state in console
+      console.warn("deleteImageFromServer: no URL found. event:", event, "passed url:", url, "gallery[event]:", gallery[event], "heroGallery:", heroGallery);
+      return alert("No image URL provided to delete. (See console for details.)");
+    }
+
+    if (!confirm("Remove this image / link?")) return;
 
     setStatus("Removing...");
     try {
       const res = await fetch(API, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventName: opts.hero ? "home_slider" : event, url, hero: !!opts.hero }),
+        body: JSON.stringify({ eventName: opts.hero ? "home_slider" : event, url: targetUrl, hero: !!opts.hero }),
       });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || "Delete failed");
 
-      if (body.gallery) {
-        setGallery(body.gallery || {});
-      } else {
-        await loadGallery();
+      const text = await res.text().catch(() => "");
+      let body;
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch (e) {
+        console.error("deleteImageFromServer: invalid JSON response from DELETE", text);
+        throw new Error("Invalid server response");
       }
+
+      if (!res.ok) throw new Error(body?.error || `Delete failed (status ${res.status})`);
+
+      // update client state
+      setGallery(body.gallery || (await loadGallery()) || {});
       setHeroGallery(body.slider || body.home_slider || []);
       setStatus("Removed");
     } catch (err) {
+      console.error("deleteImageFromServer error:", err);
       setStatus("Error: " + (err.message || String(err)));
     }
   }
@@ -344,31 +391,22 @@ export default function AdminPage() {
   // -----------------------
   async function handleHeroUpload() {
     if (!heroFiles || heroFiles.length === 0) return alert("Select hero images first.");
-
-    // validate hero files
     const validHero = heroFiles.filter(isValidImageFile);
     const invalidHeroCount = heroFiles.length - validHero.length;
     if (invalidHeroCount > 0) {
-      setStatus(`Rejected ${invalidHeroCount} hero file(s). Allowed: ${allowedExts.join(", ")}`);
+      setStatus(`Rejected ${invalidHeroCount} hero file(s). Allowed: ${allowedExts.join(", ") || "images"}`);
     }
-    if (validHero.length === 0) return alert("No valid hero image files to upload. Allowed types: " + allowedExts.join(", "));
-
+    if (validHero.length === 0) return alert("No valid hero image files to upload.");
     setHeroUploading(true);
     setStatus("Uploading hero images...");
     try {
       const fd = new FormData();
       fd.append("hero", "1");
       for (const f of validHero) fd.append("file", f);
-
       const res = await fetch(API, { method: "POST", body: fd });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Hero upload failed");
-
-      if (body.gallery) {
-        setGallery(body.gallery || {});
-      } else {
-        await loadGallery();
-      }
+      setGallery(body.gallery || (await loadGallery()) || {});
       setHeroGallery(body.slider || body.home_slider || []);
       setHeroFiles([]);
       setHeroPreview(EXAMPLE_LOCAL_PATH);
@@ -382,10 +420,9 @@ export default function AdminPage() {
 
   function onHeroFilesChange(e) {
     const list = Array.from(e.target.files || []);
-    // filter allowed
     const valid = list.filter(isValidImageFile);
     const rejected = list.length - valid.length;
-    if (rejected > 0) setStatus(`Rejected ${rejected} hero file(s). Allowed: ${allowedExts.join(", ")}`);
+    if (rejected > 0) setStatus(`Rejected ${rejected} hero file(s). Allowed: ${allowedExts.join(", ") || "images"}`);
     setHeroFiles(valid);
     if (valid.length > 0) setHeroPreview(URL.createObjectURL(valid[0]));
   }
@@ -399,7 +436,7 @@ export default function AdminPage() {
     }
     if (!isValidImageFile(f)) {
       setSingleFile(null);
-      setStatus("Invalid file selected. Allowed types: " + allowedExts.join(", "));
+      setStatus("Invalid file selected. Allowed types: " + (allowedExts.join(", ") || "images"));
       return;
     }
     setSingleFile(f);
@@ -410,7 +447,7 @@ export default function AdminPage() {
     const list = Array.from(e.target.files || []);
     const valid = list.filter(isValidImageFile);
     const rejected = list.length - valid.length;
-    if (rejected > 0) setStatus(`Rejected ${rejected} file(s). Allowed: ${allowedExts.join(", ")}`);
+    if (rejected > 0) setStatus(`Rejected ${rejected} file(s). Allowed: ${allowedExts.join(", ") || "images"}`);
     setFiles(valid);
   }
 
@@ -424,6 +461,142 @@ export default function AdminPage() {
     setSingleFile(null);
     setStatus("");
   }
+
+  // -----------------------
+  // Add YouTube folder/link (supports multiple URLs now)
+  // -----------------------
+ // Replace your addYoutubeFolder function with this
+async function addYoutubeFolder() {
+  const nameRaw = (eventName || selectedEvent || "youtube").trim();
+  if (!nameRaw) return alert("Provide a folder name (event name) or select an event.");
+  const en = nameRaw;
+
+  // parse youtubeUrls textarea: accept newline or comma separated
+  const rawInput = (youtubeUrls || "").trim();
+  let urls = [];
+  if (rawInput) {
+    urls = rawInput
+      .split(/[\n,]+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+
+  // If textarea empty, fallback to original prompt (single URL)
+  if (urls.length === 0) {
+    const single = (prompt("Paste the YouTube URL to add as an embedded item:") || "").trim();
+    if (!single) return alert("No URL provided.");
+    urls = [single];
+  }
+
+  setStatus(`Adding ${urls.length} YouTube link${urls.length !== 1 ? "s" : ""} to "${en}"...`);
+
+  const failures = [];
+  let lastBody = null;
+
+  for (let i = 0; i < urls.length; i++) {
+    const u = urls[i];
+    try {
+      const payload = { addYoutube: true, eventName: en, url: u };
+      const res = await fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      // read text so we can safely handle non-JSON responses
+      const text = await res.text().catch(() => "");
+      let body;
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch (e) {
+        // server returned non-JSON text (treat as error)
+        throw new Error("Invalid server response: " + (text ? text.slice(0, 200) : "empty"));
+      }
+
+      if (!res.ok) {
+        throw new Error(body?.error || `Failed to add URL (status ${res.status})`);
+      }
+
+      // keep last successful body to update gallery after loop
+      lastBody = body;
+      // small status update for visibility
+      setStatus(`Added ${i + 1}/${urls.length}`);
+    } catch (err) {
+      console.error("addYoutubeFolder (per-url) error for", u, err);
+      failures.push({ url: u, message: err.message || String(err) });
+      // continue with the next URL instead of aborting everything
+    }
+  }
+
+  // final UI update: if server returned gallery update, use it; else reload
+  try {
+    if (lastBody) {
+      const newGallery = lastBody.gallery ?? lastBody ?? {};
+      setGallery(newGallery);
+      setHeroGallery(lastBody.slider ?? lastBody.home_slider ?? heroGallery);
+    } else {
+      // fallback: reload from server
+      await loadGallery();
+    }
+  } catch (e) {
+    console.warn("addYoutubeFolder: failed to update gallery after posts:", e);
+  }
+
+  // status & cleanup
+  if (failures.length === 0) {
+    setStatus("YouTube link(s) added");
+    setEventName("");
+    setYoutubeUrls("");
+  } else {
+    setStatus(`Added ${urls.length - failures.length}/${urls.length} — ${failures.length} failed`);
+    alert(
+      `Some URLs failed to add:\n\n${failures
+        .map(f => `${f.url} → ${f.message}`)
+        .join("\n")}\n\nCheck console/network for details.`
+    );
+  }
+}
+
+  // -----------------------
+  // YouTube helpers
+  // -----------------------
+  function parseYouTubeId(url) {
+    try {
+      const u = new URL(url);
+      if (u.hostname.includes("youtube.com")) {
+        return u.searchParams.get("v");
+      } else if (u.hostname.includes("youtu.be")) {
+        return u.pathname.replace("/", "");
+      }
+      return null;
+    } catch (e) {
+      // fallback regex
+      const m = url.match(/(?:v=|youtu\.be\/|\/embed\/)([A-Za-z0-9_-]{6,})/);
+      return m ? m[1] : null;
+    }
+  }
+
+  function youtubeThumbUrl(url) {
+    const id = parseYouTubeId(url);
+    return id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : null;
+  }
+
+  // ---- New helpers for embedded view ----
+  // helper: is this folder a YouTube folder?
+  function isYoutubeFolder(ev) {
+    const items = gallery[ev];
+    return Array.isArray(items) && items.length > 0 && items[0]?.youtube === true;
+  }
+
+  // helper: convert a youtube url to an embed src (no autoplay)
+  function youTubeEmbedSrc(url) {
+    const id = parseYouTubeId(url);
+    return id ? `https://www.youtube.com/embed/${id}` : null;
+  }
+
+  // collect YouTube folders
+  const youtubeFolders = Object.entries(gallery)
+    .filter(([k, items]) => Array.isArray(items) && items.length > 0 && items[0]?.youtube === true);
 
   // -----------------------
   // Render
@@ -492,7 +665,7 @@ export default function AdminPage() {
                 <div className="flex flex-col sm:flex-row gap-3 mt-3">
                   <button type="button" onClick={handleFilesUpload} className="px-4 py-2 bg-blue-900 text-white rounded">Upload Event Photos</button>
 
-                  {/* RENAME OPTION (replaces Create Folder / Upload Example Local) */}
+                  {/* RENAME OPTION */}
                   <button type="button" onClick={renameEvent} className="px-4 py-2 border rounded">Rename Event</button>
 
                   <button type="button" onClick={handleResetForm} className="px-4 py-2 bg-white/50 rounded">Reset</button>
@@ -509,18 +682,16 @@ export default function AdminPage() {
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-medium">Events (folders)</h3>
               <button
-  onClick={() => {
-    if (!selectedEvent) return alert("Select an event to delete");
-    handleDeleteEvent(selectedEvent);
-  }}
-  className="hidden md:inline-block text-m text-red-700 px-2 py-1 border rounded"
->
-  Delete event
-</button>
-
+                onClick={() => {
+                  if (!selectedEvent) return alert("Select an event to delete");
+                  handleDeleteEvent(selectedEvent);
+                }}
+                className="hidden md:inline-block text-m text-red-700 px-2 py-1 border rounded"
+              >
+                Delete event
+              </button>
             </div>
 
-            {/* mobile helper text */}
             <div className="block md:hidden text-sm text-slate-500 mb-2">Tap a folder to open</div>
 
             <div className="space-y-2 max-h-[60vh] overflow-auto ">
@@ -549,20 +720,74 @@ export default function AdminPage() {
           {!selectedEvent && <p className="text-sm text-slate-600">Select a folder on the right to view its photos.</p>}
 
           {selectedEvent && (
-            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {((gallery[selectedEvent] || []).filter(img => !heroUrlSet.has(getImgUrl(img)))).map((img, i) => {
-                const url = getImgUrl(img);
-                return (
-                  <div key={i} className="border rounded overflow-hidden">
-                    <img src={img.optimized || img.original || img.thumb} alt={`img-${i}`} className="w-full h-40 object-cover" />
-                    <div className="p-2 flex items-center justify-between text-xs">
-                      <a href={img.optimized || img.original} target="_blank" rel="noreferrer" className="underline">Open</a>
-                      <button onClick={() => deleteImageFromServer(selectedEvent, url)} className="text-red-600 underline">Remove</button>
-                    </div>
+            <>
+              {isYoutubeFolder(selectedEvent) ? (
+                // ---- YouTube folder view (embedded players) ----
+                <div className="mt-4 space-y-4">
+                  <div className="text-sm text-slate-600 mb-2">This folder contains YouTube link(s). Videos open here (gallery view).</div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {(gallery[selectedEvent] || []).map((item, i) => {
+                      const url = item?.url || "";
+                      const embed = youTubeEmbedSrc(url);
+                      const title = item?.title || `Video ${i + 1}`;
+                      return (
+                        <div key={i} className="border rounded overflow-hidden bg-black/5 p-2">
+                          <div className="font-medium mb-2">{title}</div>
+                          {embed ? (
+                            <div className="relative" style={{ paddingTop: "56.25%" /* 16:9 */ }}>
+                              <iframe
+                                src={embed}
+                                title={title}
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                allowFullScreen
+                                className="absolute top-0 left-0 w-full h-full border-0"
+                              />
+                            </div>
+                          ) : (
+                            <div className="w-full h-48 bg-gray-100 flex items-center justify-center text-sm text-slate-600">Invalid YouTube URL</div>
+                          )}
+
+                          <div className="mt-2 flex items-center justify-between text-xs">
+                            <a href={url} target="_blank" rel="noreferrer" className="underline">Open on YouTube</a>
+                            <button
+                              onClick={() => deleteImageFromServer(selectedEvent, url)}
+                              className="text-red-600 underline"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
-            </div>
+                </div>
+              ) : (
+                // ---- Regular image grid (original behavior) ----
+                <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                  {((gallery[selectedEvent] || []).filter(img => !heroUrlSet.has(getImgUrl(img)))).map((img, i) => {
+                    const src = safeSrc(img);
+                    const url = getImgUrl(img);
+                    return (
+                      <div key={i} className="border rounded overflow-hidden">
+                        {src ? (
+                          <img src={src} alt={`img-${i}`} className="w-full h-40 object-cover" />
+                        ) : (
+                          <div className="w-full h-40 bg-gray-100 flex items-center justify-center text-sm text-slate-600">No preview</div>
+                        )}
+                        <div className="p-2 flex items-center justify-between text-xs">
+                          {src ? (
+                            <a href={src} target="_blank" rel="noreferrer" className="underline">Open</a>
+                          ) : (
+                            <a href={url || "#"} target="_blank" rel="noreferrer" className="underline">Open</a>
+                          )}
+                          <button onClick={() => deleteImageFromServer(selectedEvent, url)} className="text-red-600 underline">Remove</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
         </section>
 
@@ -582,7 +807,11 @@ export default function AdminPage() {
           {/* LEFT SIDE — Upload */}
           <div className="w-full sm:w-60">
             <div className="w-full h-40 bg-gray-200 border rounded overflow-hidden">
-              <img src={heroPreview} className="w-full h-full object-cover" />
+              {heroPreview ? (
+                <img src={heroPreview} className="w-full h-full object-cover" alt="hero preview" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-sm text-slate-600">No preview</div>
+              )}
             </div>
             <input
               type="file"
@@ -601,13 +830,6 @@ export default function AdminPage() {
               >
                 {heroUploading ? "Uploading..." : "Upload to Home Carousel"}
               </button>
-
-             {/* { <button
-                onClick={() => uploadExampleLocal({ hero: true })}
-                className="px-3 py-2 border rounded"
-              >
-                Upload Example Local
-              </button>} */}
 
               <button
                 onClick={() => {
@@ -630,41 +852,93 @@ export default function AdminPage() {
                 <div className="col-span-3 text-slate-400 text-m">No hero images yet</div>
               )}
 
-              {heroGallery.map((h, i) => (
-                <div key={i} className="border rounded overflow-hidden bg-white/10">
-                  <img
-                    src={h.optimized || h.original || h.thumb}
-                    className="w-full h-24 object-cover"
-                  />
-                  <div className="p-2 flex justify-between items-center">
-                    <a
-                      href={h.optimized || h.original}
-                      target="_blank"
-                      className="text-s underline"
-                      rel="noreferrer"
-                    >
-                      Open
-                    </a>
-                    <button
-                      className="text-m text-red-700 underline hover:cursor-pointer"
-                      onClick={() =>
-                        deleteImageFromServer(
-                          "home_slider",
-                          getImgUrl(h),
-                          { hero: true }
-                        )
-                      }
-                    >
-                      Remove
-                    </button>
+              {heroGallery.map((h, i) => {
+                const src = safeSrc(h);
+                const url = getImgUrl(h);
+                return (
+                  <div key={i} className="border rounded overflow-hidden bg-white/10">
+                    {src ? (
+                      <img src={src} className="w-full h-24 object-cover" alt={`hero-${i}`} />
+                    ) : (
+                      <div className="w-full h-24 bg-gray-100 flex items-center justify-center text-sm text-slate-600">No preview</div>
+                    )}
+                    <div className="p-2 flex justify-between items-center">
+                      {src ? (
+                        <a href={src} target="_blank" className="text-s underline" rel="noreferrer">Open</a>
+                      ) : (
+                        <a href={url || "#"} target="_blank" className="text-s underline" rel="noreferrer">Open</a>
+                      )}
+                      <button
+                        className="text-m text-red-700 underline hover:cursor-pointer"
+                        onClick={() =>
+                          deleteImageFromServer(
+                            "home_slider",
+                            url,
+                            { hero: true }
+                          )
+                        }
+                      >
+                        Remove
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
         </div>
+
+       
+
       </div>
+      <div className="mt-8 max-w-7xl h-full mx-auto bg-gradient-to-r from-indigo-100 via-blue-300 to-indigo-100 rounded-2xl p-6 sm:p-8 shadow-xl">
+
+       {/* ------------------------- YouTube Links Card ------------------------- */}
+        <div className="mt-8 p-4 border rounded bg-white/5">
+          <h3 className="text-xl font-semibold mb-2">YouTube Thumbnails (Dashboard)</h3>
+          <p className="text-sm mb-3">Create or manage YouTube links used on the home page. Use <strong>Add YouTube</strong> to attach a YouTube link to a folder (creates folder if needed). You can paste multiple URLs (newline or comma separated) into the box below.</p>
+
+          <div className="flex gap-2 mb-4">
+            <input value={eventName} onChange={(e) => setEventName(e.target.value)} placeholder="Folder name (or select an event)" className="flex-1 p-2 border rounded" />
+            <button onClick={addYoutubeFolder} className="px-3 py-2 bg-blue-900 text-white rounded">Add YouTube</button>
+            <button onClick={() => { setEventName(""); setStatus(""); setYoutubeUrls(""); }} className="px-3 py-2 border rounded">Clear</button>
+          </div>
+
+          <label className="block text-xs text-slate-500 mb-1">Paste one or more YouTube URLs (newline or comma separated):</label>
+          <textarea
+            value={youtubeUrls}
+            onChange={(e) => setYoutubeUrls(e.target.value)}
+            placeholder="https://youtu.be/abc..., https://www.youtube.com/watch?v=xyz..."
+            className="w-full p-2 border rounded resize-y mb-4 min-h-[80px]"
+          />
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+            {youtubeFolders.length === 0 && <div className="text-sm text-slate-500 col-span-3">No YouTube links yet</div>}
+
+            {youtubeFolders.map(([folder, items]) => {
+              const url = items?.[0]?.url || "";
+              const thumb = youtubeThumbUrl(url);
+              return (
+                <div key={folder} className="p-3 border rounded bg-white/10">
+                  <div className="font-medium mb-1">{folder.replace(/_/g, " ")}</div>
+                  <div className="h-40 mb-2">
+                    {thumb ? (
+                      <img src={thumb} alt={`yt-${folder}`} className="w-full h-full object-cover rounded" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center bg-gray-100 text-sm text-slate-600">No thumbnail</div>
+                    )}
+                  </div>
+                  <div className="flex gap-2 justify-between items-center">
+                    <a href={url} target="_blank" rel="noreferrer" className="px-3 py-1 bg-blue-900 text-white rounded text-sm">Open Link</a>
+                    <button onClick={() => deleteImageFromServer(folder, url)} className="px-3 py-1 border rounded text-red-600 text-sm">Remove</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          </div>
+        </div>
     </main>
   );
 }
