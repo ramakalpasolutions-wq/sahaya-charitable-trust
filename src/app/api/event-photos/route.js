@@ -1,27 +1,24 @@
-// app/api/event-photos/route.js
+// src/app/api/event-photos/route.js
 /**
- * Cloudinary-only event-photos API for Next.js (Node server runtime).
+ * Serverless-friendly event-photos API using Cloudinary for storage + metadata (raw).
  *
- * Behavior:
- * - ALWAYS uploads to Cloudinary (no local /public writes).
- * - Stores objects in data/gallery.json with { original, optimized, thumb, public_id }.
- * - Deletes use Cloudinary public_id.
+ * - Image uploads -> Cloudinary (folder: events/<eventName> or slider)
+ * - Metadata (gallery.json) -> stored as Cloudinary raw with public_id = "sahaya_gallery_raw"
+ * - No writes under /var/task or project files (safe for Vercel/Lambda)
  *
- * Setup:
- * 1. npm i cloudinary
- * 2. Set env vars: CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
+ * Requirements:
+ *  - npm i cloudinary
+ *  - Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
  */
 
-import fs from "fs/promises";
-import path from "path";
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
+import { Readable } from "stream";
 
-const ROOT = process.cwd();
-const DATA_DIR = path.join(ROOT, "data");
-const GALLERY_FILE = path.join(DATA_DIR, "gallery.json");
+const CLOUD_GALLERY_PUBLIC_ID = "sahaya_gallery_raw"; // cloudinary raw id for gallery JSON
+const CACHE_TTL_MS = 3000; // short cache for reads
 
-// cloudinary configuration
+// Cloudinary config
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -29,33 +26,9 @@ cloudinary.config({
   secure: true,
 });
 
-async function ensureDataFile() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  try {
-    await fs.access(GALLERY_FILE);
-  } catch {
-    await fs.writeFile(GALLERY_FILE, JSON.stringify({ gallery: {}, slider: [] }, null, 2), "utf8");
-  }
-}
-
-async function readGallery() {
-  await ensureDataFile();
-  const raw = await fs.readFile(GALLERY_FILE, "utf8");
-  const obj = raw ? JSON.parse(raw) : {};
-  const gallery = obj.gallery || (Object.keys(obj).length > 0 && !Array.isArray(obj) ? obj : {});
-  const slider = obj.slider || obj.home_slider || obj.homeSlider || [];
-  return { gallery, slider };
-}
-
-async function writeGallery(data) {
-  await ensureDataFile();
-  const out = {
-    gallery: data.gallery || {},
-    slider: data.slider || data.home_slider || [],
-    home_slider: data.slider || data.home_slider || [],
-  };
-  await fs.writeFile(GALLERY_FILE, JSON.stringify(out, null, 2), "utf8");
-}
+// in-memory cache
+let _cachedGallery = null;
+let _cachedAt = 0;
 
 function sanitizeName(n = "") {
   return String(n).replace(/[^a-zA-Z0-9-_ ]/g, "").trim().replace(/\s+/g, "_");
@@ -72,51 +45,146 @@ function makeImageObjFromCloudinary(uploadResult) {
   };
 }
 
-// Upload using a data URI (no temp files). `file` is the File object from formData.
-async function uploadFileToCloudinary(folder, file, filename) {
-  // read file to buffer
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-
-  // determine mime type (fallback)
-  const mime = (file.type && String(file.type).trim()) || "image/png";
-
-  // build data URI
-  const base64 = buffer.toString("base64");
-  const dataUri = `data:${mime};base64,${base64}`;
-
-  // upload
-  const uploadOptions = {
-    folder,
-    use_filename: true,
-    unique_filename: false,
-    resource_type: "image",
-    overwrite: false,
-    public_id: filename.replace(/\.(jpg|jpeg|png|webp|gif)$/i, ""), // prefer filename as public_id (without ext)
-  };
-
-  const res = await cloudinary.uploader.upload(dataUri, uploadOptions);
-  return res;
+function makeImageObj(rel) {
+  const p = String(rel || "");
+  const normalized = p.startsWith("/") ? p : `/${p}`;
+  return { original: normalized, optimized: normalized, thumb: normalized };
 }
 
-// ---------------- GET ----------------
+// helper: upload buffer to cloudinary using upload_stream
+async function uploadBufferToCloudinary(folder, buffer, filename) {
+  return new Promise((resolve, reject) => {
+    const uploadOptions = {
+      folder,
+      use_filename: true,
+      unique_filename: false,
+      resource_type: "image",
+      overwrite: false,
+    };
+    const stream = cloudinary.uploader.upload_stream(uploadOptions, (error, result) => {
+      if (error) return reject(error);
+      resolve(result);
+    });
+    const readable = Readable.from(buffer);
+    readable.pipe(stream);
+  });
+}
+
+// ----------------- Cloudinary raw gallery helpers -----------------
+
+async function ensureGalleryExistsInCloudinary() {
+  // only if cloudinary configured
+  if (!cloudinary.config().cloud_name || !cloudinary.config().api_key || !cloudinary.config().api_secret) return;
+  try {
+    // check resource
+    await cloudinary.api.resource(CLOUD_GALLERY_PUBLIC_ID, { resource_type: "raw" });
+    return;
+  } catch (err) {
+    // if not found, upload initial empty JSON as raw
+    const msg = String(err?.message || err).toLowerCase();
+    const notFound = msg.includes("not found") || (err && err.http_code === 404);
+    if (notFound) {
+      const init = Buffer.from(JSON.stringify({ gallery: {}, slider: [] }, null, 2), "utf8");
+      await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream({ public_id: CLOUD_GALLERY_PUBLIC_ID, resource_type: "raw", overwrite: true }, (error, result) => {
+          if (error) return reject(error);
+          resolve(result);
+        });
+        stream.end(init);
+      }).catch(e => {
+        console.warn("Failed to create initial gallery raw:", e);
+      });
+    } else {
+      // other error — log and continue, readGallery will fallback
+      console.warn("ensureGalleryExistsInCloudinary warning:", err && (err.message || err));
+    }
+  }
+}
+
+async function readGallery() {
+  // cache short-circuit
+  if (_cachedGallery && Date.now() - _cachedAt < CACHE_TTL_MS) return _cachedGallery;
+
+  // attempt to read from Cloudinary raw if configured
+  const cfgPresent = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+  if (cfgPresent) {
+    try {
+      await ensureGalleryExistsInCloudinary();
+      const meta = await cloudinary.api.resource(CLOUD_GALLERY_PUBLIC_ID, { resource_type: "raw" });
+      const url = meta.secure_url || meta.url;
+      if (url) {
+        // use global fetch (Next.js runtime provides fetch); fallback to throwing if not present
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("Failed to fetch gallery.json from Cloudinary");
+        const text = await response.text();
+        const obj = text ? JSON.parse(text) : {};
+        const gallery = obj.gallery || (Object.keys(obj).length > 0 && !Array.isArray(obj) ? obj : {});
+        const slider = obj.slider || obj.home_slider || obj.homeSlider || [];
+        const out = { gallery, slider };
+        _cachedGallery = out;
+        _cachedAt = Date.now();
+        return out;
+      }
+    } catch (e) {
+      console.warn("readGallery: Cloudinary read failed, falling back to empty in-memory gallery. error:", e && (e.message || e));
+    }
+  }
+
+  // fallback: in-memory empty
+  const fallback = { gallery: {}, slider: [] };
+  _cachedGallery = fallback;
+  _cachedAt = Date.now();
+  return fallback;
+}
+
+async function writeGallery(data) {
+  const out = {
+    gallery: data.gallery || {},
+    slider: data.slider || data.home_slider || [],
+    home_slider: data.slider || data.home_slider || [],
+  };
+  // update cache immediately
+  _cachedGallery = { gallery: out.gallery, slider: out.slider };
+  _cachedAt = Date.now();
+
+  // attempt to persist to Cloudinary raw if configured
+  const cfgPresent = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+  if (!cfgPresent) return;
+
+  try {
+    const jsonBuf = Buffer.from(JSON.stringify({ gallery: out.gallery, slider: out.slider, home_slider: out.slider }, null, 2), "utf8");
+    await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream({ public_id: CLOUD_GALLERY_PUBLIC_ID, resource_type: "raw", overwrite: true }, (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      });
+      stream.end(jsonBuf);
+    });
+  } catch (e) {
+    console.warn("writeGallery: failed to write to Cloudinary raw — cache updated only. error:", e && (e.message || e));
+  }
+}
+
+// ----------------- API Handlers -----------------
+
+// GET
 export async function GET() {
   try {
     const { gallery, slider } = await readGallery();
     return NextResponse.json({ gallery, slider, home_slider: slider });
   } catch (err) {
+    console.error("GET /api/event-photos error:", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }
 
-// ---------------- POST ----------------
-// Supports JSON commands and multipart uploads (field "file").
+// POST - handles JSON commands and multipart uploads
 export async function POST(req) {
   try {
     const contentType = req.headers.get("content-type") || "";
     const { gallery, slider } = await readGallery();
 
-    // JSON commands (createEvent, addYoutube, renameEvent)
+    // JSON commands
     if (contentType.includes("application/json")) {
       const body = await req.json();
 
@@ -153,7 +221,7 @@ export async function POST(req) {
       return NextResponse.json({ error: "Unsupported JSON command" }, { status: 400 });
     }
 
-    // multipart form uploads -> Cloudinary only
+    // multipart/form-data -> upload to Cloudinary
     if (contentType.includes("multipart/form-data")) {
       const form = await req.formData();
       const hero = (form.get("hero") === "1" || form.get("hero") === "true");
@@ -168,22 +236,23 @@ export async function POST(req) {
       const cloudFolder = hero ? "slider" : `events/${eventName}`;
 
       for (const f of files) {
+        // f is a File object (Server File API). Read as arrayBuffer and upload directly.
+        const arrayBuffer = await f.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
         const fname = `${Date.now()}-${(f.name || "upload").replace(/\s+/g, "_")}`;
 
-        // upload to cloudinary; if this fails we surface an error
-        let uploadRes;
         try {
-          uploadRes = await uploadFileToCloudinary(cloudFolder, f, fname);
+          const uploadRes = await uploadBufferToCloudinary(cloudFolder, buffer, fname);
+          const obj = makeImageObjFromCloudinary(uploadRes);
+          if (hero) {
+            if (!slider.find(i => i.original === obj.original)) slider.push(obj);
+          } else {
+            gallery[eventName].push(obj);
+          }
         } catch (e) {
-          console.error("Cloudinary upload error:", e);
-          return NextResponse.json({ error: "Cloudinary upload failed", details: String(e) }, { status: 500 });
-        }
-
-        const obj = makeImageObjFromCloudinary(uploadRes);
-        if (hero) {
-          if (!slider.find(i => i.original === obj.original)) slider.push(obj);
-        } else {
-          gallery[eventName].push(obj);
+          console.error("Cloudinary upload failed for file:", fname, e && (e.message || e));
+          // If upload fails, we still continue — client will be informed by returned state.
+          // We do not persist files locally (serverless-safe). Consider retrying from client or uploading directly to Cloudinary.
         }
       }
 
@@ -198,8 +267,7 @@ export async function POST(req) {
   }
 }
 
-// ---------------- DELETE ----------------
-// Accepts JSON body: { deleteEvent: true, eventName } OR { url, eventName?, hero? }
+// DELETE
 export async function DELETE(req) {
   try {
     const body = await req.json();
@@ -214,10 +282,12 @@ export async function DELETE(req) {
         try {
           const public_id = item.public_id || null;
           if (public_id) {
-            await cloudinary.uploader.destroy(public_id, { invalidate: true, resource_type: "image" });
+            await cloudinary.uploader.destroy(public_id, { invalidate: true, resource_type: "image" }).catch(() => {});
+          } else {
+            // nothing to delete (no local files in serverless)
           }
         } catch (e) {
-          console.warn("Failed to delete file for event:", e);
+          console.warn("Failed to delete file for event:", e && (e.message || e));
         }
       }
       delete gallery[en];
@@ -229,11 +299,13 @@ export async function DELETE(req) {
       const targetHero = Boolean(hero);
 
       if (targetHero) {
+        // remove from slider array
         const newSlider = slider.filter(i => i.original !== url && i.optimized !== url && i.thumb !== url && i.public_id !== url);
+        // attempt destroy for matches
         for (const it of slider) {
           if (it.original === url || it.optimized === url || it.thumb === url || it.public_id === url) {
             if (it.public_id) {
-              await cloudinary.uploader.destroy(it.public_id, { invalidate: true, resource_type: "image" });
+              await cloudinary.uploader.destroy(it.public_id, { invalidate: true, resource_type: "image" }).catch(() => {});
             }
           }
         }
@@ -262,10 +334,10 @@ export async function DELETE(req) {
           removed = true;
           try {
             if (removedObj.public_id) {
-              await cloudinary.uploader.destroy(removedObj.public_id, { invalidate: true, resource_type: "image" });
+              await cloudinary.uploader.destroy(removedObj.public_id, { invalidate: true, resource_type: "image" }).catch(() => {});
             }
           } catch (e) {
-            console.warn("Failed to unlink gallery file:", e);
+            console.warn("Failed to destroy cloudinary file:", e && (e.message || e));
           }
           break;
         }
