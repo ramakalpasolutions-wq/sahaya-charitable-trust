@@ -1,23 +1,19 @@
 // app/api/event-photos/route.js
 /**
- * Cloudinary-enabled event-photos API for Next.js (Node server runtime).
+ * Cloudinary-only event-photos API for Next.js (Node server runtime).
  *
- * Notes:
- * - Primary storage: Cloudinary (recommended for serverless).
- * - Fallback local saves (only used if Cloudinary upload fails) are written to OS tmp dir,
- *   NOT to the project's /public folder (which is read-only on many serverless hosts).
+ * Behavior:
+ * - ALWAYS uploads to Cloudinary (no local /public writes).
+ * - Stores objects in data/gallery.json with { original, optimized, thumb, public_id }.
+ * - Deletes use Cloudinary public_id.
  *
  * Setup:
- * 1. Install: npm i cloudinary
- * 2. Ensure env vars are set:
- *    - CLOUDINARY_CLOUD_NAME
- *    - CLOUDINARY_API_KEY
- *    - CLOUDINARY_API_SECRET
+ * 1. npm i cloudinary
+ * 2. Set env vars: CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
  */
 
 import fs from "fs/promises";
 import path from "path";
-import os from "os";
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
 
@@ -25,11 +21,7 @@ const ROOT = process.cwd();
 const DATA_DIR = path.join(ROOT, "data");
 const GALLERY_FILE = path.join(DATA_DIR, "gallery.json");
 
-// Note: we keep PUBLIC_DIR constants only for backwards compatibility when reading gallery items
-// but we DON'T try to create or write into PUBLIC_DIR in serverless environments.
-const PUBLIC_DIR = path.join(ROOT, "public"); // used only for path construction if needed
-
-// Cloudinary config from env
+// cloudinary configuration
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -37,33 +29,8 @@ cloudinary.config({
   secure: true,
 });
 
-// writable tmp dir (OS-level, safe on serverless)
-const TMP_DIR = path.join(os.tmpdir(), "sahaya_event_photos_tmp");
-
-// Flag: whether public dir appears writable (best-effort). We will NOT attempt to create public/uploads automatically.
-let PUBLIC_IS_WRITABLE = false;
-
-async function ensureFiles() {
-  // Always ensure data dir exists (we need gallery.json)
+async function ensureDataFile() {
   await fs.mkdir(DATA_DIR, { recursive: true });
-
-  // ensure tmp dir exists (writable on serverless)
-  await fs.mkdir(TMP_DIR, { recursive: true });
-
-  // detect whether PUBLIC_DIR is writable by trying to create a tiny dir inside it.
-  // We catch errors and simply set PUBLIC_IS_WRITABLE accordingly.
-  try {
-    const testDir = path.join(PUBLIC_DIR, ".write_test");
-    await fs.mkdir(testDir, { recursive: true });
-    // cleanup
-    await fs.rmdir(testDir).catch(() => {});
-    PUBLIC_IS_WRITABLE = true;
-  } catch (e) {
-    PUBLIC_IS_WRITABLE = false;
-    // don't throw — continue with tmp/cloudinary-only behavior
-  }
-
-  // ensure gallery file exists (in the data dir)
   try {
     await fs.access(GALLERY_FILE);
   } catch {
@@ -72,7 +39,7 @@ async function ensureFiles() {
 }
 
 async function readGallery() {
-  await ensureFiles();
+  await ensureDataFile();
   const raw = await fs.readFile(GALLERY_FILE, "utf8");
   const obj = raw ? JSON.parse(raw) : {};
   const gallery = obj.gallery || (Object.keys(obj).length > 0 && !Array.isArray(obj) ? obj : {});
@@ -81,7 +48,7 @@ async function readGallery() {
 }
 
 async function writeGallery(data) {
-  await ensureFiles();
+  await ensureDataFile();
   const out = {
     gallery: data.gallery || {},
     slider: data.slider || data.home_slider || [],
@@ -105,94 +72,31 @@ function makeImageObjFromCloudinary(uploadResult) {
   };
 }
 
-function makeImageObj(rel) {
-  const p = String(rel || "");
-  const normalized = p.startsWith("/") ? p : `/${p}`;
-  return { original: normalized, optimized: normalized, thumb: normalized };
-}
-
-// Upload: write file into tmp then upload to Cloudinary from tmp path
+// Upload using a data URI (no temp files). `file` is the File object from formData.
 async function uploadFileToCloudinary(folder, file, filename) {
+  // read file to buffer
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
 
-  // ensure tmp dir
-  await fs.mkdir(TMP_DIR, { recursive: true });
-  const tmpPath = path.join(TMP_DIR, filename);
-  await fs.writeFile(tmpPath, buffer);
+  // determine mime type (fallback)
+  const mime = (file.type && String(file.type).trim()) || "image/png";
 
-  try {
-    const uploadOptions = {
-      folder,              // cloudinary folder, e.g. "events/my_event" or "slider"
-      use_filename: true,
-      unique_filename: false,
-      resource_type: "image",
-      overwrite: false,
-    };
-    const res = await cloudinary.uploader.upload(tmpPath, uploadOptions);
-    return res;
-  } finally {
-    // best-effort cleanup
-    try { await fs.unlink(tmpPath).catch(() => {}); } catch (e) {}
-  }
-}
+  // build data URI
+  const base64 = buffer.toString("base64");
+  const dataUri = `data:${mime};base64,${base64}`;
 
-/**
- * Fallback: if Cloudinary upload fails, save into TMP_DIR (never attempt to write to /public by default).
- * Returns a string that may be a file:// path so it's discoverable for debugging - client should prefer Cloudinary URLs.
- */
-async function saveUploadedFileLocalFallback(file, filename) {
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  await fs.mkdir(TMP_DIR, { recursive: true });
-  const tmpPath = path.join(TMP_DIR, filename);
-  await fs.writeFile(tmpPath, buffer);
-  // Return a file:// url (client won't be able to display it, but it is useful for dev/debug)
-  return `file://${tmpPath}`;
-}
+  // upload
+  const uploadOptions = {
+    folder,
+    use_filename: true,
+    unique_filename: false,
+    resource_type: "image",
+    overwrite: false,
+    public_id: filename.replace(/\.(jpg|jpeg|png|webp|gif)$/i, ""), // prefer filename as public_id (without ext)
+  };
 
-/**
- * Delete local file if it's in tmp (file://... or path under TMP_DIR). We won't try to delete files under project/public
- * in production because that directory is often read-only.
- */
-async function tryDeleteLocalFileFromRel(rel) {
-  if (!rel) return;
-  try {
-    let candidate = String(rel);
-    if (candidate.startsWith("file://")) candidate = candidate.replace(/^file:\/\//, "");
-    // If candidate is absolute and under TMP_DIR, attempt deletion
-    if (path.resolve(candidate).startsWith(path.resolve(TMP_DIR))) {
-      if ((await fs.stat(candidate).catch(() => false))) {
-        await fs.unlink(candidate).catch(() => {});
-      }
-      return;
-    }
-
-    // If PUBLIC is writable and rel looks like a public path, attempt deletion there
-    if (PUBLIC_IS_WRITABLE) {
-      const relNoSlash = String(rel).replace(/^\//, "");
-      const p = path.join(PUBLIC_DIR, relNoSlash);
-      if ((await fs.stat(p).catch(() => false))) {
-        await fs.unlink(p).catch(() => {});
-      }
-      return;
-    }
-
-    // otherwise do not attempt deletion (likely read-only or external URL)
-    console.warn("Not deleting local file — not under tmp and public not writable:", rel);
-  } catch (e) {
-    console.warn("Failed to delete local file:", e);
-  }
-}
-
-async function tryDeleteCloudinaryPublicId(public_id) {
-  if (!public_id) return;
-  try {
-    const resp = await cloudinary.uploader.destroy(public_id, { invalidate: true, resource_type: "image" });
-    return resp;
-  } catch (e) {
-    console.warn("cloudinary destroy error:", e);
-  }
+  const res = await cloudinary.uploader.upload(dataUri, uploadOptions);
+  return res;
 }
 
 // ---------------- GET ----------------
@@ -206,12 +110,13 @@ export async function GET() {
 }
 
 // ---------------- POST ----------------
+// Supports JSON commands and multipart uploads (field "file").
 export async function POST(req) {
   try {
     const contentType = req.headers.get("content-type") || "";
     const { gallery, slider } = await readGallery();
 
-    // JSON commands
+    // JSON commands (createEvent, addYoutube, renameEvent)
     if (contentType.includes("application/json")) {
       const body = await req.json();
 
@@ -248,7 +153,7 @@ export async function POST(req) {
       return NextResponse.json({ error: "Unsupported JSON command" }, { status: 400 });
     }
 
-    // multipart form uploads -> upload to Cloudinary
+    // multipart form uploads -> Cloudinary only
     if (contentType.includes("multipart/form-data")) {
       const form = await req.formData();
       const hero = (form.get("hero") === "1" || form.get("hero") === "true");
@@ -264,19 +169,14 @@ export async function POST(req) {
 
       for (const f of files) {
         const fname = `${Date.now()}-${(f.name || "upload").replace(/\s+/g, "_")}`;
+
+        // upload to cloudinary; if this fails we surface an error
         let uploadRes;
         try {
           uploadRes = await uploadFileToCloudinary(cloudFolder, f, fname);
         } catch (e) {
-          console.warn("Cloudinary upload failed, saving to tmp as fallback:", e);
-          const relLocal = await saveUploadedFileLocalFallback(f, fname);
-          const objLocal = makeImageObj(relLocal);
-          if (hero) {
-            if (!slider.find(i => i.original === objLocal.original)) slider.push(objLocal);
-          } else {
-            gallery[eventName].push(objLocal);
-          }
-          continue;
+          console.error("Cloudinary upload error:", e);
+          return NextResponse.json({ error: "Cloudinary upload failed", details: String(e) }, { status: 500 });
         }
 
         const obj = makeImageObjFromCloudinary(uploadRes);
@@ -299,6 +199,7 @@ export async function POST(req) {
 }
 
 // ---------------- DELETE ----------------
+// Accepts JSON body: { deleteEvent: true, eventName } OR { url, eventName?, hero? }
 export async function DELETE(req) {
   try {
     const body = await req.json();
@@ -313,11 +214,7 @@ export async function DELETE(req) {
         try {
           const public_id = item.public_id || null;
           if (public_id) {
-            await tryDeleteCloudinaryPublicId(public_id);
-          } else {
-            const fileRel = String(item.original || item.optimized || item.thumb || "");
-            if (!fileRel) continue;
-            await tryDeleteLocalFileFromRel(fileRel);
+            await cloudinary.uploader.destroy(public_id, { invalidate: true, resource_type: "image" });
           }
         } catch (e) {
           console.warn("Failed to delete file for event:", e);
@@ -336,9 +233,7 @@ export async function DELETE(req) {
         for (const it of slider) {
           if (it.original === url || it.optimized === url || it.thumb === url || it.public_id === url) {
             if (it.public_id) {
-              await tryDeleteCloudinaryPublicId(it.public_id);
-            } else {
-              await tryDeleteLocalFileFromRel(it.original || it.optimized || it.thumb);
+              await cloudinary.uploader.destroy(it.public_id, { invalidate: true, resource_type: "image" });
             }
           }
         }
@@ -367,9 +262,7 @@ export async function DELETE(req) {
           removed = true;
           try {
             if (removedObj.public_id) {
-              await tryDeleteCloudinaryPublicId(removedObj.public_id);
-            } else {
-              await tryDeleteLocalFileFromRel(removedObj.original || removedObj.optimized || removedObj.thumb);
+              await cloudinary.uploader.destroy(removedObj.public_id, { invalidate: true, resource_type: "image" });
             }
           } catch (e) {
             console.warn("Failed to unlink gallery file:", e);
