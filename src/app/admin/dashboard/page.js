@@ -154,29 +154,35 @@ export default function AdminPage() {
   // Cloudinary direct upload helper
   // -----------------------
   async function uploadToCloudinary(file, folder) {
-    // get signature from server
-    const sigRes = await fetch("/api/upload-signature");
-    if (!sigRes.ok) throw new Error("Failed to get upload signature");
-    const { timestamp, signature, apiKey, cloudName } = await sigRes.json();
+  // get signature from server
+  const sigRes = await fetch(`/api/upload-signature?folder=${encodeURIComponent(folder)}`);
 
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("api_key", apiKey);
-    fd.append("timestamp", timestamp);
-    fd.append("signature", signature);
-    if (folder) fd.append("folder", folder);
+  if (!sigRes.ok) throw new Error("Failed to get upload signature");
+  const { timestamp, signature, apiKey, cloudName } = await sigRes.json();
 
-    const uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("api_key", apiKey);
+  fd.append("timestamp", timestamp);
+  fd.append("signature", signature);
+  fd.append("folder", folder); // must match the signed folder
+
+  const uploadRes = await fetch(
+    `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
+    {
       method: "POST",
       body: fd,
-    });
-
-    const json = await uploadRes.json();
-    if (!uploadRes.ok) {
-      throw new Error(json.error?.message || "Cloudinary upload failed");
     }
-    return json; // contains secure_url, public_id, etc.
+  );
+
+  const json = await uploadRes.json();
+  if (!uploadRes.ok) {
+    throw new Error(json.error?.message || "Cloudinary upload failed");
   }
+
+  return json; // contains secure_url, public_id, etc.
+}
+
 
   // -----------------------
   // Create folder
