@@ -1,9 +1,8 @@
 // src/app/api/event-photos/route.js
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
-import stream from "stream";
 
-// ---------- CLOUDINARY CONFIG ----------
+// Cloudinary config
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -11,98 +10,66 @@ cloudinary.config({
   secure: true,
 });
 
-// Where gallery.json will be stored in Cloudinary (RAW file)
-const GALLERY_PUBLIC_ID = "metadata/sahaya_gallery";
-const GALLERY_RESOURCE_TYPE = "raw";
+const META_PUBLIC_ID = "metadata/sahaya_gallery"; // same ID used to store gallery.json
+const META_RESOURCE_TYPE = "raw";
 
-// ---------- HELPERS ----------
-
-// Upload buffer (image OR json) to cloudinary
-function uploadBufferToCloudinary(buffer, options = {}) {
-  return new Promise((resolve, reject) => {
-    const uploadStream = cloudinary.uploader.upload_stream(options, (err, res) => {
-      if (err) return reject(err);
-      resolve(res);
-    });
-
-    const passthrough = new stream.PassThrough();
-    passthrough.end(buffer);
-    passthrough.pipe(uploadStream);
-  });
-}
-
-// Read gallery.json from Cloudinary
+// helper: read metadata from Cloudinary (returns { gallery, slider })
 async function readGalleryFromCloudinary() {
   try {
-    const resource = await cloudinary.api.resource(GALLERY_PUBLIC_ID, {
-      resource_type: GALLERY_RESOURCE_TYPE,
+    const resource = await cloudinary.api.resource(META_PUBLIC_ID, {
+      resource_type: META_RESOURCE_TYPE,
     });
 
     if (!resource?.secure_url) return { gallery: {}, slider: [] };
 
+    // fetch the raw JSON file from the secure_url
     const res = await fetch(resource.secure_url);
-    const json = await res.text();
-
-    let parsed = {};
+    const text = await res.text();
     try {
-      parsed = JSON.parse(json);
-    } catch {
+      const parsed = JSON.parse(text);
+      return {
+        gallery: parsed.gallery || {},
+        slider: parsed.slider || parsed.home_slider || [],
+      };
+    } catch (e) {
+      // invalid JSON stored, return empty
       return { gallery: {}, slider: [] };
     }
-
-    return {
-      gallery: parsed.gallery || {},
-      slider: parsed.slider || parsed.home_slider || [],
-    };
   } catch (e) {
+    // resource not found or other error -> return empty structures
     return { gallery: {}, slider: [] };
   }
 }
 
-// Write gallery.json back to Cloudinary
+// helper: write metadata back to Cloudinary (raw upload)
+function uploadBufferToCloudinary(buffer, public_id) {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: META_RESOURCE_TYPE,
+        public_id,
+        overwrite: true,
+      },
+      (err, result) => {
+        if (err) return reject(err);
+        resolve(result);
+      }
+    );
+    uploadStream.end(buffer);
+  });
+}
+
 async function writeGalleryToCloudinary(data) {
   const out = {
     gallery: data.gallery || {},
     slider: data.slider || [],
     home_slider: data.slider || [],
   };
-
   const buffer = Buffer.from(JSON.stringify(out, null, 2), "utf8");
-
-  return uploadBufferToCloudinary(buffer, {
-    public_id: GALLERY_PUBLIC_ID,
-    resource_type: GALLERY_RESOURCE_TYPE,
-    overwrite: true,
-  });
+  await uploadBufferToCloudinary(buffer, META_PUBLIC_ID);
 }
 
-// Upload image file directly to Cloudinary without local temp
-async function uploadImageFromFile(file, folder, filename) {
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-
-  const options = {
-    folder,
-    use_filename: true,
-    unique_filename: false,
-    resource_type: "image",
-    overwrite: false,
-    public_id: filename.replace(/\.[^/.]+$/, ""), // remove extension
-  };
-
-  return uploadBufferToCloudinary(buffer, options);
-}
-
-async function deleteCloudinary(public_id) {
-  if (!public_id) return;
-  try {
-    await cloudinary.uploader.destroy(public_id, {
-      invalidate: true,
-      resource_type: "image",
-    });
-  } catch {}
-}
-
+// sanitize names for keys
 function sanitizeName(n) {
   return String(n || "")
     .replace(/[^a-zA-Z0-9-_ ]/g, "")
@@ -110,34 +77,42 @@ function sanitizeName(n) {
     .replace(/\s+/g, "_");
 }
 
-function makeImageObj(uploadRes) {
-  const url = uploadRes.secure_url;
+// make image object shape
+function makeImageObj(url, public_id) {
   return {
     original: url,
     optimized: url,
     thumb: url,
-    public_id: uploadRes.public_id,
+    public_id,
   };
 }
 
-// ---------- GET ----------
+// GET: return gallery + slider
 export async function GET() {
-  const { gallery, slider } = await readGalleryFromCloudinary();
-  return NextResponse.json({ gallery, slider, home_slider: slider });
+  try {
+    const { gallery, slider } = await readGalleryFromCloudinary();
+    return NextResponse.json({ gallery, slider, home_slider: slider });
+  } catch (err) {
+    console.error("GET /api/event-photos:", err);
+    return NextResponse.json({ error: String(err) }, { status: 500 });
+  }
 }
 
-// ---------- POST ----------
+// POST: accepts JSON commands (createEvent, addYoutube, renameEvent, addImage, addHero)
 export async function POST(req) {
-  const contentType = req.headers.get("content-type") || "";
-  const { gallery, slider } = await readGalleryFromCloudinary();
+  try {
+    const contentType = req.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      return NextResponse.json({ error: "Unsupported content-type" }, { status: 400 });
+    }
 
-  // ----- JSON COMMANDS -----
-  if (contentType.includes("application/json")) {
     const body = await req.json();
+    let { gallery, slider } = await readGalleryFromCloudinary();
 
     // Create event
     if (body.createEvent) {
-      const name = sanitizeName(body.eventName);
+      const name = sanitizeName(body.eventName || "");
+      if (!name) return NextResponse.json({ error: "Missing eventName" }, { status: 400 });
       gallery[name] = gallery[name] || [];
       await writeGalleryToCloudinary({ gallery, slider });
       return NextResponse.json({ ok: true, gallery, slider });
@@ -147,111 +122,113 @@ export async function POST(req) {
     if (body.addYoutube && body.url) {
       const en = sanitizeName(body.eventName || "youtube");
       gallery[en] = gallery[en] || [];
-      const yt = { youtube: true, url: body.url };
-      if (!gallery[en].some(i => i.youtube && i.url === body.url)) {
-        gallery[en].push(yt);
-      }
+      const item = { youtube: true, url: body.url };
+      if (!gallery[en].some(i => i.youtube === true && i.url === body.url)) gallery[en].push(item);
       await writeGalleryToCloudinary({ gallery, slider });
       return NextResponse.json({ ok: true, gallery, slider });
     }
 
     // Rename event
     if (body.renameEvent || (body.oldName && body.newName)) {
-      const oldName = sanitizeName(body.oldName);
-      const newName = sanitizeName(body.newName);
+      const oldName = sanitizeName(body.oldName || "");
+      const newName = sanitizeName(body.newName || "");
+      if (!oldName || !newName) return NextResponse.json({ error: "Missing names" }, { status: 400 });
+      gallery[newName] = gallery[newName] || [];
       if (gallery[oldName]) {
-        gallery[newName] = [...(gallery[newName] || []), ...gallery[oldName]];
+        gallery[newName] = gallery[newName].concat(gallery[oldName]);
         delete gallery[oldName];
       }
       await writeGalleryToCloudinary({ gallery, slider });
       return NextResponse.json({ ok: true, gallery, slider });
     }
 
-    return NextResponse.json({ error: "Invalid JSON command" }, { status: 400 });
-  }
-
-  // ----- FILE UPLOADS -----
-  if (contentType.includes("multipart/form-data")) {
-    const form = await req.formData();
-
-    const hero = form.get("hero") === "1" || form.get("hero") === "true";
-    const eventName = hero
-      ? "home_slider"
-      : sanitizeName(form.get("eventName") || "");
-
-    const files = form.getAll("file");
-    if (!files.length) return NextResponse.json({ error: "No file" }, { status: 400 });
-
-    if (!hero) gallery[eventName] = gallery[eventName] || [];
-
-    const folder = hero ? "slider" : `events/${eventName}`;
-
-    for (const f of files) {
-      const fname = `${Date.now()}-${(f.name || "upload").replace(/\s+/g, "_")}`;
-      try {
-        const uploadRes = await uploadImageFromFile(f, folder, fname);
-        const obj = makeImageObj(uploadRes);
-
-        if (hero) slider.push(obj);
-        else gallery[eventName].push(obj);
-      } catch (err) {
-        console.error("Upload failed:", err);
-      }
+    // Add image metadata (after direct Cloudinary upload)
+    // Accept array or single
+    if (body.addImage && body.eventName && body.url) {
+      const en = sanitizeName(body.eventName || "");
+      gallery[en] = gallery[en] || [];
+      gallery[en].push(makeImageObj(body.url, body.public_id || null));
+      await writeGalleryToCloudinary({ gallery, slider });
+      return NextResponse.json({ ok: true, gallery, slider });
     }
 
-    await writeGalleryToCloudinary({ gallery, slider });
-    return NextResponse.json({ ok: true, gallery, slider });
-  }
+    // Add multiple uploaded images at once (optional shape)
+    if (Array.isArray(body.uploaded) && body.eventName) {
+      const en = sanitizeName(body.eventName);
+      gallery[en] = gallery[en] || [];
+      for (const it of body.uploaded) {
+        if (it?.url) gallery[en].push(makeImageObj(it.url, it.public_id || null));
+      }
+      await writeGalleryToCloudinary({ gallery, slider });
+      return NextResponse.json({ ok: true, gallery, slider });
+    }
 
-  return NextResponse.json({ error: "Unsupported content-type" }, { status: 400 });
+    // Add hero (home slider)
+    if (body.addHero && body.url) {
+      slider.push(makeImageObj(body.url, body.public_id || null));
+      await writeGalleryToCloudinary({ gallery, slider });
+      return NextResponse.json({ ok: true, gallery, slider });
+    }
+
+    return NextResponse.json({ error: "Unsupported JSON command" }, { status: 400 });
+  } catch (err) {
+    console.error("POST /api/event-photos:", err);
+    return NextResponse.json({ error: String(err) }, { status: 500 });
+  }
 }
 
-// ---------- DELETE ----------
+// DELETE: { deleteEvent, eventName } OR { url, public_id, hero? }
 export async function DELETE(req) {
-  const body = await req.json();
-  const { gallery, slider } = await readGalleryFromCloudinary();
+  try {
+    const body = await req.json();
+    let { gallery, slider } = await readGalleryFromCloudinary();
 
-  const { deleteEvent, eventName, url, hero } = body;
+    const { deleteEvent, eventName, url, public_id, hero } = body;
 
-  // Delete whole event
-  if (deleteEvent && eventName) {
-    const en = sanitizeName(eventName);
-    const items = gallery[en] || [];
-
-    for (const it of items) {
-      if (it.public_id) await deleteCloudinary(it.public_id);
+    if (deleteEvent && eventName) {
+      const en = sanitizeName(eventName);
+      const list = gallery[en] || [];
+      for (const item of list) {
+        if (item.public_id) {
+          try { await cloudinary.uploader.destroy(item.public_id, { resource_type: "image" }); } catch (e) {}
+        }
+      }
+      delete gallery[en];
+      await writeGalleryToCloudinary({ gallery, slider });
+      return NextResponse.json({ ok: true, gallery, slider });
     }
 
-    delete gallery[en];
-    await writeGalleryToCloudinary({ gallery, slider });
+    if (hero && (url || public_id)) {
+      const newSlider = slider.filter(i => i.original !== url && i.public_id !== public_id);
+      // delete matched cloudinary resource
+      for (const it of slider) {
+        if (it.original === url || it.public_id === public_id) {
+          if (it.public_id) {
+            try { await cloudinary.uploader.destroy(it.public_id, { resource_type: "image" }); } catch (e) {}
+          }
+        }
+      }
+      await writeGalleryToCloudinary({ gallery, slider: newSlider });
+      return NextResponse.json({ ok: true, gallery, slider: newSlider });
+    }
 
-    return NextResponse.json({ ok: true, gallery, slider });
-  }
-
-  // Hero image delete
-  if (hero && url) {
-    const match = slider.find(i => i.original === url || i.public_id === url);
-    if (match?.public_id) await deleteCloudinary(match.public_id);
-
-    const newSlider = slider.filter(i => i.original !== url && i.public_id !== url);
-
-    await writeGalleryToCloudinary({ gallery, slider: newSlider });
-    return NextResponse.json({ ok: true, gallery, slider: newSlider });
-  }
-
-  // Normal image delete
-  if (url) {
-    for (const en of Object.keys(gallery)) {
-      const idx = gallery[en].findIndex(i => i.original === url || i.public_id === url);
-      if (idx !== -1) {
-        const item = gallery[en][idx];
-        if (item.public_id) await deleteCloudinary(item.public_id);
-        gallery[en].splice(idx, 1);
-        await writeGalleryToCloudinary({ gallery, slider });
-        return NextResponse.json({ ok: true, gallery, slider });
+    if (url || public_id) {
+      for (const en of Object.keys(gallery)) {
+        const idx = gallery[en].findIndex(i => i.original === url || i.public_id === public_id);
+        if (idx >= 0) {
+          const [removedObj] = gallery[en].splice(idx, 1);
+          if (removedObj.public_id) {
+            try { await cloudinary.uploader.destroy(removedObj.public_id, { resource_type: "image" }); } catch (e) {}
+          }
+          await writeGalleryToCloudinary({ gallery, slider });
+          return NextResponse.json({ ok: true, gallery, slider });
+        }
       }
     }
-  }
 
-  return NextResponse.json({ error: "Invalid delete request" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid delete request" }, { status: 400 });
+  } catch (err) {
+    console.error("DELETE /api/event-photos:", err);
+    return NextResponse.json({ error: String(err) }, { status: 500 });
+  }
 }

@@ -1,5 +1,4 @@
 // src/app/admin/page.js
-
 "use client";
 
 import { useEffect, useState } from "react";
@@ -152,6 +151,34 @@ export default function AdminPage() {
   };
 
   // -----------------------
+  // Cloudinary direct upload helper
+  // -----------------------
+  async function uploadToCloudinary(file, folder) {
+    // get signature from server
+    const sigRes = await fetch("/api/upload-signature");
+    if (!sigRes.ok) throw new Error("Failed to get upload signature");
+    const { timestamp, signature, apiKey, cloudName } = await sigRes.json();
+
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("api_key", apiKey);
+    fd.append("timestamp", timestamp);
+    fd.append("signature", signature);
+    if (folder) fd.append("folder", folder);
+
+    const uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+      method: "POST",
+      body: fd,
+    });
+
+    const json = await uploadRes.json();
+    if (!uploadRes.ok) {
+      throw new Error(json.error?.message || "Cloudinary upload failed");
+    }
+    return json; // contains secure_url, public_id, etc.
+  }
+
+  // -----------------------
   // Create folder
   // -----------------------
   async function createFolder() {
@@ -191,11 +218,12 @@ export default function AdminPage() {
   }
 
   // -----------------------
-  // Upload images to an event (creates event on server if missing)
+  // Upload images to an event (direct to Cloudinary)
   // -----------------------
   async function handleFilesUpload(e) {
     e?.preventDefault?.();
-    const target = useExisting ? selectedEvent : eventName;
+    const targetRaw = useExisting ? selectedEvent : eventName;
+    const target = String(targetRaw || "").trim();
     if (!target) return alert("Please choose or enter an event name.");
     const toUpload = singleFile ? [singleFile] : files;
     if (!toUpload || toUpload.length === 0) return alert("Pick one or more images to upload.");
@@ -207,26 +235,40 @@ export default function AdminPage() {
     }
     if (valid.length === 0) return alert("No valid image files to upload. Allowed types: " + (allowedExts.join(", ") || "images"));
 
-    setStatus("Uploading to event...");
+    setStatus("Uploading to Cloudinary...");
     try {
-      const fd = new FormData();
-      fd.append("eventName", target);
-      fd.append("hero", "0");
-      for (const f of valid) fd.append("file", f);
+      const uploadedItems = [];
+      let i = 1;
+      for (const f of valid) {
+        setStatus(`Uploading ${i}/${valid.length}...`);
+        const uploadRes = await uploadToCloudinary(f, `events/${target}`);
+        uploadedItems.push({
+          url: uploadRes.secure_url,
+          public_id: uploadRes.public_id,
+        });
+        i++;
+      }
 
-      const res = await fetch(API, { method: "POST", body: fd });
-      const body = await res.json();
+      // Post metadata to /api/event-photos in a single request
+      const metaRes = await fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uploaded: uploadedItems, eventName: target }),
+      });
 
-      if (!res.ok) throw new Error(body.error || "Upload failed");
+      const metaBody = await metaRes.json();
+      if (!metaRes.ok) throw new Error(metaBody.error || "Failed to save metadata");
 
-      setGallery(body.gallery || body || (await loadGallery()) || {});
-      setHeroGallery(body.slider || body.home_slider || []);
+      // update UI
+      setGallery(metaBody.gallery || (await loadGallery()) || {});
+      setHeroGallery(metaBody.slider || metaBody.home_slider || []);
       setSelectedEvent(target);
       setFiles([]);
       setSingleFile(null);
       setEventName("");
       setStatus("Uploaded successfully");
     } catch (err) {
+      console.error("handleFilesUpload error:", err);
       setStatus("Error: " + (err.message || String(err)));
     }
   }
@@ -310,7 +352,7 @@ export default function AdminPage() {
 
   // -----------------------
   // delete single image (event or hero) or a youtube link (url)
-  // client: robust deleteImageFromServer - replace your current function
+  // -----------------------
   async function deleteImageFromServer(event, url, opts = { hero: false }) {
     // try to find a usable url if none passed
     let targetUrl = (typeof url === "string" && url.trim()) ? url : null;
@@ -321,38 +363,32 @@ export default function AdminPage() {
         const u = getImgUrl(it);
         if (u) {
           targetUrl = u;
-          console.debug("deleteImageFromServer: derived url from gallery item:", it);
           break;
         }
-        // fallback to explicit url field
         if (it && it.url) {
           targetUrl = it.url;
-          console.debug("deleteImageFromServer: derived url from gallery item.url:", it);
           break;
         }
       }
     }
 
-    // try heroGallery when hero flag or when event is the hero key
+    // try heroGallery when hero flag or when event is home_slider
     if (!targetUrl && (opts.hero || event === "home_slider" || event === "homeSlider" || event === "home-slider")) {
       for (const it of heroGallery || []) {
         const u = getImgUrl(it);
         if (u) {
           targetUrl = u;
-          console.debug("deleteImageFromServer: derived url from heroGallery item:", it);
           break;
         }
         if (it && it.url) {
           targetUrl = it.url;
-          console.debug("deleteImageFromServer: derived url from heroGallery item.url:", it);
           break;
         }
       }
     }
 
     if (!targetUrl) {
-      // give more actionable message and show state in console
-      console.warn("deleteImageFromServer: no URL found. event:", event, "passed url:", url, "gallery[event]:", gallery[event], "heroGallery:", heroGallery);
+      console.warn("deleteImageFromServer: no URL found. event:", event);
       return alert("No image URL provided to delete. (See console for details.)");
     }
 
@@ -388,7 +424,7 @@ export default function AdminPage() {
   }
 
   // -----------------------
-  // hero upload
+  // hero upload (direct to Cloudinary)
   // -----------------------
   async function handleHeroUpload() {
     if (!heroFiles || heroFiles.length === 0) return alert("Select hero images first.");
@@ -401,18 +437,31 @@ export default function AdminPage() {
     setHeroUploading(true);
     setStatus("Uploading hero images...");
     try {
-      const fd = new FormData();
-      fd.append("hero", "1");
-      for (const f of validHero) fd.append("file", f);
-      const res = await fetch(API, { method: "POST", body: fd });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || "Hero upload failed");
-      setGallery(body.gallery || (await loadGallery()) || {});
-      setHeroGallery(body.slider || body.home_slider || []);
+      const uploaded = [];
+      let i = 1;
+      for (const f of validHero) {
+        setStatus(`Uploading hero ${i}/${validHero.length}...`);
+        const uploadRes = await uploadToCloudinary(f, `slider`);
+        uploaded.push({ url: uploadRes.secure_url, public_id: uploadRes.public_id });
+        i++;
+      }
+
+      // send batch metadata to API (we'll use uploaded array shape)
+      const metaRes = await fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uploaded, hero: true, eventName: "home_slider" }),
+      });
+      const metaBody = await metaRes.json();
+      if (!metaRes.ok) throw new Error(metaBody.error || "Hero metadata save failed");
+
+      setGallery(metaBody.gallery || (await loadGallery()) || {});
+      setHeroGallery(metaBody.slider || metaBody.home_slider || []);
       setHeroFiles([]);
       setHeroPreview(EXAMPLE_LOCAL_PATH);
       setStatus("Hero uploaded");
     } catch (err) {
+      console.error("handleHeroUpload error:", err);
       setStatus("Error: " + (err.message || String(err)));
     } finally {
       setHeroUploading(false);
@@ -466,8 +515,7 @@ export default function AdminPage() {
   // -----------------------
   // Add YouTube folder/link (supports multiple URLs now)
   // -----------------------
- // Replace your addYoutubeFolder function with this
-async function addYoutubeFolder() {
+ async function addYoutubeFolder() {
   const nameRaw = (eventName || selectedEvent || "youtube").trim();
   if (!nameRaw) return alert("Provide a folder name (event name) or select an event.");
   const en = nameRaw;
@@ -791,11 +839,9 @@ async function addYoutubeFolder() {
             </>
           )}
         </section>
-
       </div>
 
       {/* ------------------------- HERO UPLOAD CARD ------------------------- */}
-
       <div className="mt-8 max-w-7xl h-full mx-auto bg-gradient-to-r from-indigo-100 via-blue-300 to-indigo-100 rounded-2xl p-6 sm:p-8 shadow-xl">
         <h3 className="hero text-2xl font-semibold text-center mb-8">Hero Section  {`->`} Upload</h3>
         <p className="text-sm mb-3 text-slate-700">
@@ -804,7 +850,6 @@ async function addYoutubeFolder() {
         </p>
 
         <div className="flex flex-col sm:flex-row gap-6">
-
           {/* LEFT SIDE — Upload */}
           <div className="w-full sm:w-60">
             <div className="w-full h-40 bg-gray-200 border rounded overflow-hidden">
@@ -887,15 +932,11 @@ async function addYoutubeFolder() {
               })}
             </div>
           </div>
-
         </div>
-
-       
-
       </div>
-      <div className="mt-8 max-w-7xl h-full mx-auto bg-gradient-to-r from-indigo-100 via-blue-300 to-indigo-100 rounded-2xl p-6 sm:p-8 shadow-xl">
 
-       {/* ------------------------- YouTube Links Card ------------------------- */}
+      {/* YouTube card (unchanged) */}
+      <div className="mt-8 max-w-7xl h-full mx-auto bg-gradient-to-r from-indigo-100 via-blue-300 to-indigo-100 rounded-2xl p-6 sm:p-8 shadow-xl">
         <div className="mt-8 p-4 border rounded bg-white/5">
           <h3 className="text-xl font-semibold mb-2">YouTube Thumbnails (Dashboard)</h3>
           <p className="text-sm mb-3">Create or manage YouTube links used on the home page. Use <strong>Add YouTube</strong> to attach a YouTube link to a folder (creates folder if needed). You can paste multiple URLs (newline or comma separated) into the box below.</p>
@@ -938,8 +979,8 @@ async function addYoutubeFolder() {
               );
             })}
           </div>
-          </div>
         </div>
+      </div>
     </main>
   );
 }
