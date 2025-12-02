@@ -1,4 +1,3 @@
-// src/app/api/event-photos/route.js
 import { NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
 
@@ -142,8 +141,7 @@ export async function POST(req) {
       return NextResponse.json({ ok: true, gallery, slider });
     }
 
-    // Add image metadata (after direct Cloudinary upload)
-    // Accept array or single
+    // Add image metadata (after direct Cloudinary upload) - single
     if (body.addImage && body.eventName && body.url) {
       const en = sanitizeName(body.eventName || "");
       gallery[en] = gallery[en] || [];
@@ -152,8 +150,8 @@ export async function POST(req) {
       return NextResponse.json({ ok: true, gallery, slider });
     }
 
-    // Add multiple uploaded images at once (optional shape)
-    if (Array.isArray(body.uploaded) && body.eventName) {
+    // Add multiple uploaded images at once (non-hero)
+    if (Array.isArray(body.uploaded) && body.eventName && !body.hero) {
       const en = sanitizeName(body.eventName);
       gallery[en] = gallery[en] || [];
       for (const it of body.uploaded) {
@@ -163,9 +161,28 @@ export async function POST(req) {
       return NextResponse.json({ ok: true, gallery, slider });
     }
 
-    // Add hero (home slider)
+    // Add hero images (batch) — handle uploaded array + hero flag
+    if (Array.isArray(body.uploaded) && body.hero) {
+      // Ensure slider exists
+      slider = slider || [];
+      for (const it of body.uploaded) {
+        if (it?.url) {
+          // avoid duplicate exact URLs
+          if (!slider.some(s => (s.original === it.url) || (s.public_id && s.public_id === it.public_id))) {
+            slider.push(makeImageObj(it.url, it.public_id || null));
+          }
+        }
+      }
+      await writeGalleryToCloudinary({ gallery, slider });
+      return NextResponse.json({ ok: true, gallery, slider });
+    }
+
+    // Add hero (single)
     if (body.addHero && body.url) {
-      slider.push(makeImageObj(body.url, body.public_id || null));
+      slider = slider || [];
+      if (!slider.some(s => s.original === body.url || (s.public_id && s.public_id === body.public_id))) {
+        slider.push(makeImageObj(body.url, body.public_id || null));
+      }
       await writeGalleryToCloudinary({ gallery, slider });
       return NextResponse.json({ ok: true, gallery, slider });
     }

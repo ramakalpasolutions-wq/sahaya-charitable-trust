@@ -1,4 +1,3 @@
-// src/app/admin/page.js
 "use client";
 
 import { useEffect, useState } from "react";
@@ -41,7 +40,6 @@ export default function AdminPage() {
     return img.original || img.optimized || img.thumb || "";
   }
 
-  // safeSrc returns the string or null (so <img src={null} won't render)
   function safeSrc(img) {
     const s = getImgUrl(img);
     return s && s.trim() !== "" ? s : null;
@@ -51,20 +49,15 @@ export default function AdminPage() {
     return new Set((heroArr || []).map(getImgUrl).filter(Boolean));
   }
 
-  // Allowed extensions (lowercase) and simple MIME check
-  // NOTE: change this list if you want to accept jpg/png etc.
   const allowedExts = [];
   function isValidImageFile(file) {
     if (!file) return false;
-    // basic MIME check
     if (file.type && !file.type.startsWith("image/")) return false;
-    // extension check fallback (accept if extension matches allowedExts)
     const name = (file.name || "").toLowerCase();
     if (allowedExts.length === 0) return true;
     return allowedExts.some(ext => name.endsWith(ext));
   }
 
-  // Keys that represent the home slider in various API shapes
   const HERO_KEYS = new Set(["home_slider", "home-slider", "homeSlider"]);
 
   // -----------------------
@@ -82,25 +75,12 @@ export default function AdminPage() {
   async function loadGallery() {
     try {
       const res = await fetch(API);
-
-      // Read as text first so we can recover from empty/non-JSON responses
-      const text = await res.text().catch((e) => {
-        console.warn("loadGallery: failed to read response text:", e);
-        return "";
-      });
-
-      // Helpful debug output (dev only)
-      if (!res.ok || !text) {
-        console.debug("loadGallery: status=", res.status, "bodyLength=", text ? text.length : 0);
-      }
-
+      const text = await res.text().catch(() => "");
       let body;
       try {
         body = text ? JSON.parse(text) : {};
       } catch (parseErr) {
-        console.error("loadGallery: invalid JSON from", API, "status:", res.status);
-        console.error("Response body (raw):", text);
-        // Set UI state to a friendly error and bail out (avoid uncaught json() error)
+        console.error("loadGallery: invalid JSON:", parseErr, text);
         setGallery({});
         setHeroGallery([]);
         setSelectedEvent("");
@@ -109,12 +89,10 @@ export default function AdminPage() {
       }
 
       if (!res.ok) {
-        // body might contain an { error: ... } message
         const errMsg = body?.error || `Failed to load gallery (status ${res.status})`;
         throw new Error(errMsg);
       }
 
-      // Backwards compatible parsing (your original logic)
       const galleryFromBody = body.gallery ?? body;
       const sliderFromBody = body.slider ?? body.home_slider ?? body.homeSlider ?? [];
 
@@ -141,10 +119,7 @@ export default function AdminPage() {
 
   // computed helpers for UI
   const heroUrlSet = getHeroUrlSet(heroGallery);
-
-  // Expose only non-hero keys as events (so hero images are not listed as an event/folder)
   const events = Object.keys(gallery).filter(k => !HERO_KEYS.has(k)).sort((a, b) => a.localeCompare(b));
-
   const safeCount = (ev) => {
     const list = gallery[ev] || [];
     return list.filter((img) => !heroUrlSet.has(getImgUrl(img))).length;
@@ -154,73 +129,27 @@ export default function AdminPage() {
   // Cloudinary direct upload helper
   // -----------------------
   async function uploadToCloudinary(file, folder) {
-  // get signature from server
-  const sigRes = await fetch(`/api/upload-signature?folder=${encodeURIComponent(folder)}`);
+    const sigRes = await fetch(`/api/upload-signature?folder=${encodeURIComponent(folder)}`);
+    if (!sigRes.ok) throw new Error("Failed to get upload signature");
+    const { timestamp, signature, apiKey, cloudName } = await sigRes.json();
 
-  if (!sigRes.ok) throw new Error("Failed to get upload signature");
-  const { timestamp, signature, apiKey, cloudName } = await sigRes.json();
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("api_key", apiKey);
+    fd.append("timestamp", timestamp);
+    fd.append("signature", signature);
+    fd.append("folder", folder);
 
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("api_key", apiKey);
-  fd.append("timestamp", timestamp);
-  fd.append("signature", signature);
-  fd.append("folder", folder); // must match the signed folder
-
-  const uploadRes = await fetch(
-    `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
-    {
+    const uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
       method: "POST",
       body: fd,
+    });
+
+    const json = await uploadRes.json();
+    if (!uploadRes.ok) {
+      throw new Error(json.error?.message || "Cloudinary upload failed");
     }
-  );
-
-  const json = await uploadRes.json();
-  if (!uploadRes.ok) {
-    throw new Error(json.error?.message || "Cloudinary upload failed");
-  }
-
-  return json; // contains secure_url, public_id, etc.
-}
-
-
-  // -----------------------
-  // Create folder
-  // -----------------------
-  async function createFolder() {
-    const name = (eventName || "").trim();
-    if (!name) return alert("Enter a new event name to create a folder.");
-    setStatus("Creating folder...");
-    try {
-      const res = await fetch(API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ createEvent: true, eventName: name }),
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || "Failed to create folder");
-      setGallery(body.gallery || (await loadGallery()) || {});
-      setSelectedEvent(name);
-      setEventName("");
-      setStatus("Folder created");
-    } catch (err) {
-      console.warn("createFolder fallback: ", err);
-      try {
-        const res2 = await fetch(API, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ filePath: EXAMPLE_LOCAL_PATH, eventName: name, hero: false }),
-        });
-        const body2 = await res2.json();
-        if (!res2.ok) throw new Error(body2.error || "Fallback folder creation failed");
-        setGallery(body2.gallery || (await loadGallery()) || {});
-        setSelectedEvent(name);
-        setEventName("");
-        setStatus("Folder created (via example upload)");
-      } catch (err2) {
-        setStatus("Error creating folder: " + (err2.message || String(err2)));
-      }
-    }
+    return json;
   }
 
   // -----------------------
@@ -255,7 +184,6 @@ export default function AdminPage() {
         i++;
       }
 
-      // Post metadata to /api/event-photos in a single request
       const metaRes = await fetch(API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -266,8 +194,11 @@ export default function AdminPage() {
       if (!metaRes.ok) throw new Error(metaBody.error || "Failed to save metadata");
 
       // update UI
-      setGallery(metaBody.gallery || (await loadGallery()) || {});
-      setHeroGallery(metaBody.slider || metaBody.home_slider || []);
+      if (metaBody.gallery) setGallery(metaBody.gallery);
+      if (metaBody.slider) setHeroGallery(metaBody.slider);
+      // fallback to reload if server didn't return updated structure
+      if (!metaBody.gallery && !metaBody.slider) await loadGallery();
+
       setSelectedEvent(target);
       setFiles([]);
       setSingleFile(null);
@@ -300,13 +231,11 @@ export default function AdminPage() {
         body: JSON.stringify({ renameEvent: true, oldName: current, newName: newKey }),
       });
       const body = await res.json();
-
       if (!res.ok) throw new Error(body.error || "Server refused rename");
       setGallery(body.gallery || (await loadGallery()) || {});
       setSelectedEvent(newKey);
       setStatus("Renamed (server confirmed)");
     } catch (err) {
-      // fallback local rename
       setGallery(prev => {
         const copy = { ...prev };
         if (!copy[current]) {
@@ -360,10 +289,8 @@ export default function AdminPage() {
   // delete single image (event or hero) or a youtube link (url)
   // -----------------------
   async function deleteImageFromServer(event, url, opts = { hero: false }) {
-    // try to find a usable url if none passed
     let targetUrl = (typeof url === "string" && url.trim()) ? url : null;
 
-    // try gallery[event]
     if (!targetUrl && event && gallery[event] && Array.isArray(gallery[event])) {
       for (const it of gallery[event]) {
         const u = getImgUrl(it);
@@ -378,7 +305,6 @@ export default function AdminPage() {
       }
     }
 
-    // try heroGallery when hero flag or when event is home_slider
     if (!targetUrl && (opts.hero || event === "home_slider" || event === "homeSlider" || event === "home-slider")) {
       for (const it of heroGallery || []) {
         const u = getImgUrl(it);
@@ -419,7 +345,6 @@ export default function AdminPage() {
 
       if (!res.ok) throw new Error(body?.error || `Delete failed (status ${res.status})`);
 
-      // update client state
       setGallery(body.gallery || (await loadGallery()) || {});
       setHeroGallery(body.slider || body.home_slider || []);
       setStatus("Removed");
@@ -452,17 +377,39 @@ export default function AdminPage() {
         i++;
       }
 
-      // send batch metadata to API (we'll use uploaded array shape)
+      // send batch metadata to API (we'll use uploaded array shape and hero:true)
       const metaRes = await fetch(API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ uploaded, hero: true, eventName: "home_slider" }),
       });
-      const metaBody = await metaRes.json();
+
+      // defensive parse
+      let metaBody = {};
+      try {
+        metaBody = await metaRes.json();
+      } catch (e) {
+        // if server returned non-json, reload
+        console.warn("handleHeroUpload: non-JSON response, reloading gallery", e);
+        await loadGallery();
+        setHeroFiles([]);
+        setHeroPreview(EXAMPLE_LOCAL_PATH);
+        setStatus("Hero uploaded (server returned non-JSON)");
+        return;
+      }
+
       if (!metaRes.ok) throw new Error(metaBody.error || "Hero metadata save failed");
 
-      setGallery(metaBody.gallery || (await loadGallery()) || {});
-      setHeroGallery(metaBody.slider || metaBody.home_slider || []);
+      // Prefer server returned slider and gallery; fallback to reloading
+      if (metaBody.slider || metaBody.home_slider) {
+        setHeroGallery(metaBody.slider || metaBody.home_slider || []);
+      } else {
+        // if server returned gallery only, update that and reload slider
+        setGallery(metaBody.gallery || gallery);
+        // refresh whole gallery to be safe
+        await loadGallery();
+      }
+
       setHeroFiles([]);
       setHeroPreview(EXAMPLE_LOCAL_PATH);
       setStatus("Hero uploaded");
@@ -483,7 +430,6 @@ export default function AdminPage() {
     if (valid.length > 0) setHeroPreview(URL.createObjectURL(valid[0]));
   }
 
-  // Update singleFile with validation
   function onSingleFileChange(e) {
     const f = e.target.files?.[0] || null;
     if (!f) {
@@ -498,7 +444,6 @@ export default function AdminPage() {
     setSingleFile(f);
   }
 
-  // Update files (multiple) with validation
   function onMultipleFilesChange(e) {
     const list = Array.from(e.target.files || []);
     const valid = list.filter(isValidImageFile);
@@ -521,96 +466,86 @@ export default function AdminPage() {
   // -----------------------
   // Add YouTube folder/link (supports multiple URLs now)
   // -----------------------
- async function addYoutubeFolder() {
-  const nameRaw = (eventName || selectedEvent || "youtube").trim();
-  if (!nameRaw) return alert("Provide a folder name (event name) or select an event.");
-  const en = nameRaw;
+  async function addYoutubeFolder() {
+    const nameRaw = (eventName || selectedEvent || "youtube").trim();
+    if (!nameRaw) return alert("Provide a folder name (event name) or select an event.");
+    const en = nameRaw;
 
-  // parse youtubeUrls textarea: accept newline or comma separated
-  const rawInput = (youtubeUrls || "").trim();
-  let urls = [];
-  if (rawInput) {
-    urls = rawInput
-      .split(/[\n,]+/)
-      .map(s => s.trim())
-      .filter(Boolean);
-  }
+    const rawInput = (youtubeUrls || "").trim();
+    let urls = [];
+    if (rawInput) {
+      urls = rawInput
+        .split(/[\n,]+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+    }
 
-  // If textarea empty, fallback to original prompt (single URL)
-  if (urls.length === 0) {
-    const single = (prompt("Paste the YouTube URL to add as an embedded item:") || "").trim();
-    if (!single) return alert("No URL provided.");
-    urls = [single];
-  }
+    if (urls.length === 0) {
+      const single = (prompt("Paste the YouTube URL to add as an embedded item:") || "").trim();
+      if (!single) return alert("No URL provided.");
+      urls = [single];
+    }
 
-  setStatus(`Adding ${urls.length} YouTube link${urls.length !== 1 ? "s" : ""} to "${en}"...`);
+    setStatus(`Adding ${urls.length} YouTube link${urls.length !== 1 ? "s" : ""} to "${en}"...`);
 
-  const failures = [];
-  let lastBody = null;
+    const failures = [];
+    let lastBody = null;
 
-  for (let i = 0; i < urls.length; i++) {
-    const u = urls[i];
-    try {
-      const payload = { addYoutube: true, eventName: en, url: u };
-      const res = await fetch(API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      // read text so we can safely handle non-JSON responses
-      const text = await res.text().catch(() => "");
-      let body;
+    for (let i = 0; i < urls.length; i++) {
+      const u = urls[i];
       try {
-        body = text ? JSON.parse(text) : {};
-      } catch (e) {
-        // server returned non-JSON text (treat as error)
-        throw new Error("Invalid server response: " + (text ? text.slice(0, 200) : "empty"));
-      }
+        const payload = { addYoutube: true, eventName: en, url: u };
+        const res = await fetch(API, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
 
-      if (!res.ok) {
-        throw new Error(body?.error || `Failed to add URL (status ${res.status})`);
-      }
+        const text = await res.text().catch(() => "");
+        let body;
+        try {
+          body = text ? JSON.parse(text) : {};
+        } catch (e) {
+          throw new Error("Invalid server response: " + (text ? text.slice(0, 200) : "empty"));
+        }
 
-      // keep last successful body to update gallery after loop
-      lastBody = body;
-      // small status update for visibility
-      setStatus(`Added ${i + 1}/${urls.length}`);
-    } catch (err) {
-      console.error("addYoutubeFolder (per-url) error for", u, err);
-      failures.push({ url: u, message: err.message || String(err) });
-      // continue with the next URL instead of aborting everything
+        if (!res.ok) {
+          throw new Error(body?.error || `Failed to add URL (status ${res.status})`);
+        }
+
+        lastBody = body;
+        setStatus(`Added ${i + 1}/${urls.length}`);
+      } catch (err) {
+        console.error("addYoutubeFolder (per-url) error for", u, err);
+        failures.push({ url: u, message: err.message || String(err) });
+      }
     }
-  }
 
-  // final UI update: if server returned gallery update, use it; else reload
-  try {
-    if (lastBody) {
-      const newGallery = lastBody.gallery ?? lastBody ?? {};
-      setGallery(newGallery);
-      setHeroGallery(lastBody.slider ?? lastBody.home_slider ?? heroGallery);
+    try {
+      if (lastBody) {
+        const newGallery = lastBody.gallery ?? lastBody ?? {};
+        setGallery(newGallery);
+        setHeroGallery(lastBody.slider ?? lastBody.home_slider ?? heroGallery);
+      } else {
+        await loadGallery();
+      }
+    } catch (e) {
+      console.warn("addYoutubeFolder: failed to update gallery after posts:", e);
+    }
+
+    if (failures.length === 0) {
+      setStatus("YouTube link(s) added");
+      setEventName("");
+      setYoutubeUrls("");
     } else {
-      // fallback: reload from server
-      await loadGallery();
+      setStatus(`Added ${urls.length - failures.length}/${urls.length} — ${failures.length} failed`);
+      alert(
+        `Some URLs failed to add:\n\n${failures
+          .map(f => `${f.url} → ${f.message}`)
+          .join("\n")}\n\nCheck console/network for details.`
+      );
     }
-  } catch (e) {
-    console.warn("addYoutubeFolder: failed to update gallery after posts:", e);
   }
-
-  // status & cleanup
-  if (failures.length === 0) {
-    setStatus("YouTube link(s) added");
-    setEventName("");
-    setYoutubeUrls("");
-  } else {
-    setStatus(`Added ${urls.length - failures.length}/${urls.length} — ${failures.length} failed`);
-    alert(
-      `Some URLs failed to add:\n\n${failures
-        .map(f => `${f.url} → ${f.message}`)
-        .join("\n")}\n\nCheck console/network for details.`
-    );
-  }
-}
 
   // -----------------------
   // YouTube helpers
@@ -625,7 +560,6 @@ export default function AdminPage() {
       }
       return null;
     } catch (e) {
-      // fallback regex
       const m = url.match(/(?:v=|youtu\.be\/|\/embed\/)([A-Za-z0-9_-]{6,})/);
       return m ? m[1] : null;
     }
@@ -636,20 +570,16 @@ export default function AdminPage() {
     return id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : null;
   }
 
-  // ---- New helpers for embedded view ----
-  // helper: is this folder a YouTube folder?
   function isYoutubeFolder(ev) {
     const items = gallery[ev];
     return Array.isArray(items) && items.length > 0 && items[0]?.youtube === true;
   }
 
-  // helper: convert a youtube url to an embed src (no autoplay)
   function youTubeEmbedSrc(url) {
     const id = parseYouTubeId(url);
     return id ? `https://www.youtube.com/embed/${id}` : null;
   }
 
-  // collect YouTube folders
   const youtubeFolders = Object.entries(gallery)
     .filter(([k, items]) => Array.isArray(items) && items.length > 0 && items[0]?.youtube === true);
 
@@ -789,7 +719,7 @@ export default function AdminPage() {
                         <div key={i} className="border rounded overflow-hidden bg-black/5 p-2">
                           <div className="font-medium mb-2">{title}</div>
                           {embed ? (
-                            <div className="relative" style={{ paddingTop: "56.25%" /* 16:9 */ }}>
+                            <div className="relative" style={{ paddingTop: "56.25%" }}>
                               <iframe
                                 src={embed}
                                 title={title}
