@@ -154,34 +154,34 @@ export default function AdminPage() {
   // Cloudinary direct upload helper
   // -----------------------
   async function uploadToCloudinary(file, folder) {
-  // get signature from server
-  const sigRes = await fetch(`/api/upload-signature?folder=${encodeURIComponent(folder)}`);
+    // get signature from server
+    const sigRes = await fetch(`/api/upload-signature?folder=${encodeURIComponent(folder)}`);
 
-  if (!sigRes.ok) throw new Error("Failed to get upload signature");
-  const { timestamp, signature, apiKey, cloudName } = await sigRes.json();
+    if (!sigRes.ok) throw new Error("Failed to get upload signature");
+    const { timestamp, signature, apiKey, cloudName } = await sigRes.json();
 
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("api_key", apiKey);
-  fd.append("timestamp", timestamp);
-  fd.append("signature", signature);
-  fd.append("folder", folder); // must match the signed folder
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("api_key", apiKey);
+    fd.append("timestamp", timestamp);
+    fd.append("signature", signature);
+    fd.append("folder", folder); // must match the signed folder
 
-  const uploadRes = await fetch(
-    `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
-    {
-      method: "POST",
-      body: fd,
+    const uploadRes = await fetch(
+      `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
+      {
+        method: "POST",
+        body: fd,
+      }
+    );
+
+    const json = await uploadRes.json();
+    if (!uploadRes.ok) {
+      throw new Error(json.error?.message || "Cloudinary upload failed");
     }
-  );
 
-  const json = await uploadRes.json();
-  if (!uploadRes.ok) {
-    throw new Error(json.error?.message || "Cloudinary upload failed");
+    return json; // contains secure_url, public_id, etc.
   }
-
-  return json; // contains secure_url, public_id, etc.
-}
 
 
   // -----------------------
@@ -256,11 +256,25 @@ export default function AdminPage() {
       }
 
       // Post metadata to /api/event-photos in a single request
-      const metaRes = await fetch(API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uploaded: uploadedItems, eventName: target }),
-      });
+      // Save each hero image individually (backend expects addHero)
+      for (const item of uploaded) {
+        await fetch(API, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            addHero: true,
+            url: item.url,
+            public_id: item.public_id
+          }),
+        });
+      }
+
+      // reload
+      await loadGallery();
+      setHeroFiles([]);
+      setHeroPreview(EXAMPLE_LOCAL_PATH);
+      setStatus("Hero uploaded successfully");
+
 
       const metaBody = await metaRes.json();
       if (!metaRes.ok) throw new Error(metaBody.error || "Failed to save metadata");
@@ -521,96 +535,96 @@ export default function AdminPage() {
   // -----------------------
   // Add YouTube folder/link (supports multiple URLs now)
   // -----------------------
- async function addYoutubeFolder() {
-  const nameRaw = (eventName || selectedEvent || "youtube").trim();
-  if (!nameRaw) return alert("Provide a folder name (event name) or select an event.");
-  const en = nameRaw;
+  async function addYoutubeFolder() {
+    const nameRaw = (eventName || selectedEvent || "youtube").trim();
+    if (!nameRaw) return alert("Provide a folder name (event name) or select an event.");
+    const en = nameRaw;
 
-  // parse youtubeUrls textarea: accept newline or comma separated
-  const rawInput = (youtubeUrls || "").trim();
-  let urls = [];
-  if (rawInput) {
-    urls = rawInput
-      .split(/[\n,]+/)
-      .map(s => s.trim())
-      .filter(Boolean);
-  }
+    // parse youtubeUrls textarea: accept newline or comma separated
+    const rawInput = (youtubeUrls || "").trim();
+    let urls = [];
+    if (rawInput) {
+      urls = rawInput
+        .split(/[\n,]+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+    }
 
-  // If textarea empty, fallback to original prompt (single URL)
-  if (urls.length === 0) {
-    const single = (prompt("Paste the YouTube URL to add as an embedded item:") || "").trim();
-    if (!single) return alert("No URL provided.");
-    urls = [single];
-  }
+    // If textarea empty, fallback to original prompt (single URL)
+    if (urls.length === 0) {
+      const single = (prompt("Paste the YouTube URL to add as an embedded item:") || "").trim();
+      if (!single) return alert("No URL provided.");
+      urls = [single];
+    }
 
-  setStatus(`Adding ${urls.length} YouTube link${urls.length !== 1 ? "s" : ""} to "${en}"...`);
+    setStatus(`Adding ${urls.length} YouTube link${urls.length !== 1 ? "s" : ""} to "${en}"...`);
 
-  const failures = [];
-  let lastBody = null;
+    const failures = [];
+    let lastBody = null;
 
-  for (let i = 0; i < urls.length; i++) {
-    const u = urls[i];
-    try {
-      const payload = { addYoutube: true, eventName: en, url: u };
-      const res = await fetch(API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      // read text so we can safely handle non-JSON responses
-      const text = await res.text().catch(() => "");
-      let body;
+    for (let i = 0; i < urls.length; i++) {
+      const u = urls[i];
       try {
-        body = text ? JSON.parse(text) : {};
-      } catch (e) {
-        // server returned non-JSON text (treat as error)
-        throw new Error("Invalid server response: " + (text ? text.slice(0, 200) : "empty"));
-      }
+        const payload = { addYoutube: true, eventName: en, url: u };
+        const res = await fetch(API, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
 
-      if (!res.ok) {
-        throw new Error(body?.error || `Failed to add URL (status ${res.status})`);
-      }
+        // read text so we can safely handle non-JSON responses
+        const text = await res.text().catch(() => "");
+        let body;
+        try {
+          body = text ? JSON.parse(text) : {};
+        } catch (e) {
+          // server returned non-JSON text (treat as error)
+          throw new Error("Invalid server response: " + (text ? text.slice(0, 200) : "empty"));
+        }
 
-      // keep last successful body to update gallery after loop
-      lastBody = body;
-      // small status update for visibility
-      setStatus(`Added ${i + 1}/${urls.length}`);
-    } catch (err) {
-      console.error("addYoutubeFolder (per-url) error for", u, err);
-      failures.push({ url: u, message: err.message || String(err) });
-      // continue with the next URL instead of aborting everything
+        if (!res.ok) {
+          throw new Error(body?.error || `Failed to add URL (status ${res.status})`);
+        }
+
+        // keep last successful body to update gallery after loop
+        lastBody = body;
+        // small status update for visibility
+        setStatus(`Added ${i + 1}/${urls.length}`);
+      } catch (err) {
+        console.error("addYoutubeFolder (per-url) error for", u, err);
+        failures.push({ url: u, message: err.message || String(err) });
+        // continue with the next URL instead of aborting everything
+      }
     }
-  }
 
-  // final UI update: if server returned gallery update, use it; else reload
-  try {
-    if (lastBody) {
-      const newGallery = lastBody.gallery ?? lastBody ?? {};
-      setGallery(newGallery);
-      setHeroGallery(lastBody.slider ?? lastBody.home_slider ?? heroGallery);
+    // final UI update: if server returned gallery update, use it; else reload
+    try {
+      if (lastBody) {
+        const newGallery = lastBody.gallery ?? lastBody ?? {};
+        setGallery(newGallery);
+        setHeroGallery(lastBody.slider ?? lastBody.home_slider ?? heroGallery);
+      } else {
+        // fallback: reload from server
+        await loadGallery();
+      }
+    } catch (e) {
+      console.warn("addYoutubeFolder: failed to update gallery after posts:", e);
+    }
+
+    // status & cleanup
+    if (failures.length === 0) {
+      setStatus("YouTube link(s) added");
+      setEventName("");
+      setYoutubeUrls("");
     } else {
-      // fallback: reload from server
-      await loadGallery();
+      setStatus(`Added ${urls.length - failures.length}/${urls.length} — ${failures.length} failed`);
+      alert(
+        `Some URLs failed to add:\n\n${failures
+          .map(f => `${f.url} → ${f.message}`)
+          .join("\n")}\n\nCheck console/network for details.`
+      );
     }
-  } catch (e) {
-    console.warn("addYoutubeFolder: failed to update gallery after posts:", e);
   }
-
-  // status & cleanup
-  if (failures.length === 0) {
-    setStatus("YouTube link(s) added");
-    setEventName("");
-    setYoutubeUrls("");
-  } else {
-    setStatus(`Added ${urls.length - failures.length}/${urls.length} — ${failures.length} failed`);
-    alert(
-      `Some URLs failed to add:\n\n${failures
-        .map(f => `${f.url} → ${f.message}`)
-        .join("\n")}\n\nCheck console/network for details.`
-    );
-  }
-}
 
   // -----------------------
   // YouTube helpers
